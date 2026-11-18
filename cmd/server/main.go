@@ -22,14 +22,15 @@ import (
 	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 	"github.com/LingByte/miniseadrama/pkg/apidocs"
 	"github.com/LingByte/miniseadrama/pkg/bootstrap"
-	"github.com/LingByte/miniseadrama/pkg/common/jwtutil"
-	jwtingin "github.com/LingByte/miniseadrama/pkg/common/jwtutil/gin"
+	"github.com/LingByte/miniseadrama/pkg/common/eventbus"
 	"github.com/LingByte/miniseadrama/pkg/common/i18n"
 	i18ngin "github.com/LingByte/miniseadrama/pkg/common/i18n/gin"
-	respgin "github.com/LingByte/miniseadrama/pkg/common/response/gin"
-	"github.com/LingByte/miniseadrama/pkg/common/response"
+	"github.com/LingByte/miniseadrama/pkg/common/jwtutil"
+	jwtingin "github.com/LingByte/miniseadrama/pkg/common/jwtutil/gin"
 	"github.com/LingByte/miniseadrama/pkg/common/logger"
 	"github.com/LingByte/miniseadrama/pkg/common/middleware"
+	"github.com/LingByte/miniseadrama/pkg/common/response"
+	respgin "github.com/LingByte/miniseadrama/pkg/common/response/gin"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -172,19 +173,21 @@ func main() {
 	info.JWTAuth = jwtAuth
 
 	app := bootstrap.New(info.Name, appOpts...)
+	events := app.Events()
 
 	// Register event listeners (post-processing for domain events)
 	app.AddInitHook(constants.HookRegisterListeners, func(ctx context.Context) error {
-		listeners.Register(db)
+		listeners.Register(events, db)
 		return nil
 	})
 
 	// Register HTTP server as a lifecycle component
 	app.Register("http-server", &httpServerComponent{
-		info: info,
-		cfg:  cfg,
-		db:   db,
-		jwtAuth: jwtAuth,
+		info:        info,
+		cfg:         cfg,
+		db:          db,
+		events:      events,
+		jwtAuth:     jwtAuth,
 		i18nManager: i18nManager,
 	})
 	// Register cache as a lifecycle component (graceful shutdown)
@@ -200,11 +203,12 @@ func main() {
 // HTTP server lifecycle component
 
 type httpServerComponent struct {
-	info   *handlers.AppInfo
-	cfg    *configs.Config
-	db     *gorm.DB
-	server *http.Server
-	jwtAuth *jwtutil.Auth
+	info        *handlers.AppInfo
+	cfg         *configs.Config
+	db          *gorm.DB
+	events      eventbus.Bus
+	server      *http.Server
+	jwtAuth     *jwtutil.Auth
 	i18nManager *i18n.Manager
 }
 
@@ -256,7 +260,7 @@ func (c *httpServerComponent) Start(ctx context.Context) error {
 	})
 
 	// Create handlers and register routes (humax.Group: Gin + OpenAPI docs)
-	h := handlers.New(c.cfg, *c.info, c.db)
+	h := handlers.New(c.cfg, *c.info, c.db, c.events)
 	h.Register(r, api)
 
 	c.server = &http.Server{

@@ -3,69 +3,69 @@
 package listeners
 
 import (
-	"github.com/LingByte/miniseadrama/internal/constants"
+	"context"
 
-	"github.com/LingByte/miniseadrama/pkg/common"
+	"github.com/LingByte/miniseadrama/internal/constants"
+	"github.com/LingByte/miniseadrama/internal/types"
+
+	"github.com/LingByte/miniseadrama/pkg/common/eventbus"
 	"github.com/LingByte/miniseadrama/pkg/common/logger"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// registerUserListeners connects handlers for user-related events.
-func registerUserListeners(db *gorm.DB) {
-	sig := common.Sig()
+// registerUserListeners subscribes handlers for user-related events.
+func registerUserListeners(bus eventbus.Bus, db *gorm.DB) {
+	_ = db // reserved for future listener side-effects
 
-	// EventUserRegistered: log new registrations
-	// Params: userID uint, username string, email string
-	sig.Connect(constants.EventUserRegistered, safeEmit(constants.EventUserRegistered, func(sender any, params ...any) {
-		if len(params) < 3 {
-			return
+	bus.Subscribe(constants.EventUserRegistered, safeHandler(func(ctx context.Context, e *eventbus.Event) error {
+		p, ok := e.Payload.(types.UserRegisteredEvent)
+		if !ok {
+			logger.Lg.Warn("unexpected payload for user.registered", zap.Any("payload", e.Payload))
+			return nil
 		}
-		userID, _ := params[0].(uint)
-		username, _ := params[1].(string)
-		email, _ := params[2].(string)
 		logger.Lg.Info("user registered",
-			zap.Uint("userID", userID),
-			zap.String("username", username),
-			zap.String("email", email),
+			zap.Uint("userID", p.UserID),
+			zap.String("username", p.Username),
+			zap.String("email", p.Email),
 		)
 		// TODO: send welcome email, create default preferences, etc.
+		return nil
 	}))
 
-	// EventUserLogin: log successful logins
-	// Params: userID uint, username string
-	sig.Connect(constants.EventUserLogin, safeEmit(constants.EventUserLogin, func(sender any, params ...any) {
-		if len(params) < 2 {
-			return
+	bus.Subscribe(constants.EventUserLogin, safeHandler(func(ctx context.Context, e *eventbus.Event) error {
+		p, ok := e.Payload.(types.UserLoginEvent)
+		if !ok {
+			logger.Lg.Warn("unexpected payload for user.login", zap.Any("payload", e.Payload))
+			return nil
 		}
-		userID, _ := params[0].(uint)
-		username, _ := params[1].(string)
 		logger.Lg.Info("user login",
-			zap.Uint("userID", userID),
-			zap.String("username", username),
+			zap.Uint("userID", p.UserID),
+			zap.String("username", p.Username),
 		)
 		// TODO: update audit log, check suspicious login patterns, etc.
+		return nil
 	}))
 
-	// EventUserPasswordChanged: log password changes
-	// Params: userID uint
-	sig.Connect(constants.EventUserPasswordChanged, safeEmit(constants.EventUserPasswordChanged, func(sender any, params ...any) {
-		if len(params) < 1 {
-			return
+	bus.Subscribe(constants.EventUserPasswordChanged, safeHandler(func(ctx context.Context, e *eventbus.Event) error {
+		p, ok := e.Payload.(types.UserPasswordChangedEvent)
+		if !ok {
+			logger.Lg.Warn("unexpected payload for user.password_changed", zap.Any("payload", e.Payload))
+			return nil
 		}
-		userID, _ := params[0].(uint)
-		logger.Lg.Info("user password changed", zap.Uint("userID", userID))
+		logger.Lg.Info("user password changed", zap.Uint("userID", p.UserID))
 		// TODO: send security notification email, invalidate sessions, etc.
+		return nil
 	}))
 
-	// EventUserDeleted: log user deletions
-	// Params: userID uint
-	sig.Connect(constants.EventUserDeleted, safeEmit(constants.EventUserDeleted, func(sender any, params ...any) {
-		if len(params) < 1 {
-			return
+	bus.Subscribe(constants.EventUserDeleted, safeHandler(func(ctx context.Context, e *eventbus.Event) error {
+		p, ok := e.Payload.(types.UserDeletedEvent)
+		if !ok {
+			logger.Lg.Warn("unexpected payload for user.deleted", zap.Any("payload", e.Payload))
+			return nil
 		}
-		userID, _ := params[0].(uint)
-		logger.Lg.Info("user deleted", zap.Uint("userID", userID))
+		logger.Lg.Info("user deleted", zap.Uint("userID", p.UserID))
 		// TODO: cleanup user data, revoke tokens, notify related services, etc.
+		return nil
 	}))
 }

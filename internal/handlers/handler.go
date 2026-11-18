@@ -10,7 +10,6 @@ import (
 	"github.com/LingByte/miniseadrama/internal/models"
 	"github.com/LingByte/miniseadrama/internal/types"
 
-	"github.com/LingByte/miniseadrama/pkg/common"
 	"github.com/LingByte/miniseadrama/pkg/common/password"
 	"github.com/LingByte/miniseadrama/pkg/common/response"
 	respgin "github.com/LingByte/miniseadrama/pkg/common/response/gin"
@@ -175,7 +174,11 @@ func (h *Handlers) RegisterUser(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	common.Sig().Emit(constants.EventUserRegistered, h, user.ID, user.Username, user.Email)
+	h.publish(c.Request.Context(), constants.EventUserRegistered, h, types.UserRegisteredEvent{
+		UserID:   user.ID,
+		Username: user.Username,
+		Email:    user.Email,
+	})
 	respgin.Created(c, types.ToUserResponse(&user))
 }
 
@@ -232,7 +235,11 @@ func (h *Handlers) CreateUser(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	common.Sig().Emit(constants.EventUserRegistered, h, user.ID, user.Username, user.Email)
+	h.publish(c.Request.Context(), constants.EventUserRegistered, h, types.UserRegisteredEvent{
+		UserID:   user.ID,
+		Username: user.Username,
+		Email:    user.Email,
+	})
 	respgin.Created(c, types.ToUserResponse(&user))
 }
 
@@ -349,7 +356,9 @@ func (h *Handlers) ChangePassword(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	common.Sig().Emit(constants.EventUserPasswordChanged, h, user.ID)
+	h.publish(c.Request.Context(), constants.EventUserPasswordChanged, h, types.UserPasswordChangedEvent{
+		UserID: user.ID,
+	})
 	respgin.Success(c, gin.H{"message": "password changed"})
 }
 
@@ -374,7 +383,9 @@ func (h *Handlers) DeleteUser(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	common.Sig().Emit(constants.EventUserDeleted, h, req.ID)
+	h.publish(c.Request.Context(), constants.EventUserDeleted, h, types.UserDeletedEvent{
+		UserID: req.ID,
+	})
 	respgin.NoContent(c)
 }
 

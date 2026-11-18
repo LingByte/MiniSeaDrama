@@ -22,7 +22,7 @@ func newTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	cfg := configs.Default()
 	r := gin.New()
-	h := New(cfg, AppInfo{Name: "test", Version: "0.0.0-test"}, nil)
+	h := New(cfg, AppInfo{Name: "test", Version: "0.0.0-test"}, nil, nil)
 	api := apidocs.Mount(r, apidocs.Options{Title: "test", Version: "0.0.0-test"})
 	h.Register(r, api)
 	return r

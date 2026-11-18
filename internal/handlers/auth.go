@@ -10,7 +10,6 @@ import (
 	"github.com/LingByte/miniseadrama/internal/models"
 	"github.com/LingByte/miniseadrama/internal/types"
 
-	"github.com/LingByte/miniseadrama/pkg/common"
 	"github.com/LingByte/miniseadrama/pkg/common/jwtutil"
 	"github.com/LingByte/miniseadrama/pkg/common/password"
 	"github.com/LingByte/miniseadrama/pkg/common/response"
@@ -86,8 +85,11 @@ func (h *Handlers) Login(c *gin.Context) {
 	// Update last login time (unix timestamp)
 	_ = models.User{}.UpdateLastLogin(h.db.WithContext(c.Request.Context()), user.ID, time.Now().Unix())
 
-	// Emit login event for post-processing (audit log, notifications, etc.)
-	common.Sig().Emit(constants.EventUserLogin, h, user.ID, user.Username)
+	// Publish login event for post-processing (audit log, notifications, etc.)
+	h.publish(c.Request.Context(), constants.EventUserLogin, h, types.UserLoginEvent{
+		UserID:   user.ID,
+		Username: user.Username,
+	})
 
 	respgin.Success(c, types.TokenResponse{
 		AccessToken:  pair.AccessToken,

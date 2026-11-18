@@ -10,7 +10,7 @@ const (
 	// role-permission assignments (RBAC only).
 	HookSeedRBAC = "seed-rbac"
 
-	// HookRegisterListeners connects all signal event listeners to
-	// the process-wide common.Sig() bus.
+	// HookRegisterListeners connects domain event listeners to the
+	// application event bus (pkg/common/eventbus).
 	HookRegisterListeners = "register-listeners"
 )

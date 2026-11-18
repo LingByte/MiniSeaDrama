@@ -3,11 +3,13 @@
 package handlers
 
 import (
+	"context"
 	"time"
 
 	"github.com/LingByte/miniseadrama/internal/configs"
-	"github.com/LingByte/miniseadrama/pkg/common/jwtutil"
 	"github.com/LingByte/miniseadrama/pkg/apidocs/humax"
+	"github.com/LingByte/miniseadrama/pkg/common/eventbus"
+	"github.com/LingByte/miniseadrama/pkg/common/jwtutil"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -19,7 +21,7 @@ type AppInfo struct {
 	Version   string
 	BuildTime string
 	GitCommit string
-	JWTAuth *jwtutil.Auth
+	JWTAuth   *jwtutil.Auth
 }
 
 // Handlers is the HTTP handler collection.
@@ -28,19 +30,30 @@ type Handlers struct {
 	cfg       *configs.Config
 	info      AppInfo
 	db        *gorm.DB
+	events    eventbus.Bus
 	startTime time.Time
-	jwtAuth *jwtutil.Auth
+	jwtAuth   *jwtutil.Auth
 }
 
 // New creates a new Handlers instance.
-func New(cfg *configs.Config, info AppInfo, db *gorm.DB) *Handlers {
+// events may be nil in tests; domain event publish becomes a no-op.
+func New(cfg *configs.Config, info AppInfo, db *gorm.DB, events eventbus.Bus) *Handlers {
 	return &Handlers{
 		cfg:       cfg,
 		info:      info,
 		db:        db,
+		events:    events,
 		startTime: time.Now(),
-		jwtAuth: info.JWTAuth,
+		jwtAuth:   info.JWTAuth,
 	}
+}
+
+// publish sends a domain event on the application event bus.
+func (h *Handlers) publish(ctx context.Context, name string, source, payload any) {
+	if h.events == nil {
+		return
+	}
+	_ = h.events.Publish(ctx, eventbus.NewWithSource(name, source, payload))
 }
 
 // Register registers all routes via humax.Group (Gin + OpenAPI docs).
