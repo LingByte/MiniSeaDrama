@@ -12,7 +12,7 @@
 //	url := pkgstorage.PublicURL("avatars/photo.jpg")
 //
 // To switch to cloud storage (S3/OSS/COS/MinIO etc.):
-//  1. go get the corresponding driver module, e.g. go get github.com/LingByte/miniseadrama/pkg/stores/s3
+//  1. go get the corresponding driver module, e.g. go get github.com/LingByte/miniseadrama/pkg/common/stores/s3
 //  2. Add a case in Init() for the driver
 //  3. Set storage.driver in configs/config.yaml
 package storage
@@ -22,8 +22,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/LingByte/miniseadrama/pkg/stores"
-	"github.com/LingByte/miniseadrama/pkg/stores/local"
+	"github.com/LingByte/miniseadrama/pkg/common/stores"
+	"github.com/LingByte/miniseadrama/pkg/common/stores/local"
 )
 
 // Package-level singleton.
