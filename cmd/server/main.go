@@ -15,13 +15,9 @@ import (
 	"github.com/LingByte/miniseadrama/internal/listeners"
 	localmw "github.com/LingByte/miniseadrama/internal/middlewares"
 	"github.com/LingByte/miniseadrama/internal/models"
-	pkgcache "github.com/LingByte/miniseadrama/pkg/cache"
-	pkglock "github.com/LingByte/miniseadrama/pkg/lock"
-	pkgretry "github.com/LingByte/miniseadrama/pkg/retry"
-	pkgfallback "github.com/LingByte/miniseadrama/pkg/fallback"
-	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 	"github.com/LingByte/miniseadrama/pkg/apidocs"
 	"github.com/LingByte/miniseadrama/pkg/bootstrap"
+	pkgcache "github.com/LingByte/miniseadrama/pkg/cache"
 	"github.com/LingByte/miniseadrama/pkg/common/eventbus"
 	"github.com/LingByte/miniseadrama/pkg/common/i18n"
 	i18ngin "github.com/LingByte/miniseadrama/pkg/common/i18n/gin"
@@ -31,6 +27,10 @@ import (
 	"github.com/LingByte/miniseadrama/pkg/common/middleware"
 	"github.com/LingByte/miniseadrama/pkg/common/response"
 	respgin "github.com/LingByte/miniseadrama/pkg/common/response/gin"
+	pkgfallback "github.com/LingByte/miniseadrama/pkg/fallback"
+	pkglock "github.com/LingByte/miniseadrama/pkg/lock"
+	pkgretry "github.com/LingByte/miniseadrama/pkg/retry"
+	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -52,6 +52,10 @@ func main() {
 	}
 
 	// Load configuration
+	// 先加载 configs/.env（存在则生效，不覆盖已设置的环境变量），再读 YAML
+	if err := configs.LoadEnvFile("configs/.env"); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "failed to load configs/.env: %v\n", err)
+	}
 	cfg, err := configs.Load("configs/config.yaml")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
@@ -108,7 +112,7 @@ func main() {
 		}
 		// dev/test: AutoMigrate; prod: manual SQL migrations
 		if cfg.App.Environment == "dev" || cfg.App.Environment == "test" {
-			appOpts = append(appOpts, bootstrap.WithAutoMigrate(db, &models.User{}))
+			appOpts = append(appOpts, bootstrap.WithAutoMigrate(db, &models.User{}, &models.AdminScript{}))
 		}
 	}
 
@@ -144,7 +148,11 @@ func main() {
 	recoveryTimeout, _ := time.ParseDuration(cfg.CircuitBreaker.RecoveryTimeout)
 	middleware.InitTimeoutCircuitManager(
 		middleware.TimeoutConfig{
-			DefaultTimeout:   30 * time.Second,
+			DefaultTimeout: 30 * time.Second,
+			// 生成类接口耗时长：透传 Python 任务、Word 下载、生图（约 1 分钟以上）
+			EndpointTimeouts: map[string]time.Duration{
+				"/api/v1/ai/": 5 * time.Minute,
+			},
 			FallbackResponse: map[string]interface{}{"error": "service_unavailable", "message": "service temporarily unavailable"},
 		},
 		middleware.CircuitBreakerConfig{
@@ -153,8 +161,8 @@ func main() {
 			OpenTimeout:           recoveryTimeout,
 			MaxConcurrentRequests: cfg.CircuitBreaker.MinRequests,
 		},
-		true,                        // enableTimeout
-		cfg.CircuitBreaker.Enabled,  // enableCircuitBreaker
+		true,                       // enableTimeout
+		cfg.CircuitBreaker.Enabled, // enableCircuitBreaker
 	)
 
 	// Initialize JWT authentication (ling-base/common/jwtutil)
@@ -245,6 +253,7 @@ func (c *httpServerComponent) Start(ctx context.Context) error {
 			"/health", "/live", "/ready", "/api/v1/version",
 			"/api/v1/auth/login", "/api/v1/auth/refresh",
 			"/api/v1/register",
+			"/api/v1/bootstrap",
 			"/docs", "/openapi",
 		)))
 	}

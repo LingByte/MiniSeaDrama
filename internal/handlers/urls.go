@@ -68,6 +68,37 @@ func (h *Handlers) registerRoutes(r *humax.Group) {
 	h.registerAuthRoutes(r)
 	h.registerUserRoutes(r)
 	h.registerFileRoutes(r)
+	h.registerAdminRoutes(r)
+}
+
+// registerAdminRoutes registers admin script management + front-end bootstrap.
+func (h *Handlers) registerAdminRoutes(r *humax.Group) {
+	r.GET("/api/v1/bootstrap", h.Bootstrap)
+
+	admin := r.Group("/api/v1/admin")
+	{
+		admin.GET("/all", h.AdminAll)
+		admin.POST("/scripts", h.CreateAdminScript)
+		admin.PUT("/scripts/:id", h.UpsertAdminScript)
+		admin.DELETE("/scripts/:id", h.DeleteAdminScript)
+		admin.POST("/scripts/:id/file", h.UploadAdminScriptFile)
+	}
+
+	ai := r.Group("/api/v1/ai")
+	{
+		ai.POST("/inspect", h.AIInspect)
+		ai.GET("/artifacts", h.AIExistingArtifacts)
+		ai.GET("/artifacts/file", h.AIExistingArtifactFile)
+		ai.POST("/jobs", h.AICreateJob)
+		ai.GET("/jobs/:id", h.AIGetJob)
+		ai.POST("/jobs/:id/pause", h.AIPauseJob)
+		ai.POST("/jobs/:id/resume", h.AIResumeJob)
+		ai.GET("/jobs/:id/files/:key", h.AIGetJobFile)
+		ai.POST("/cover", h.AIGenerateCover)
+	}
+
+	// 买家购买后下载剧本 Word（与 Node 版路由保持一致）
+	r.GET("/api/v1/scripts/:id/file", h.DownloadScriptFile)
 }
 
 // registerSystemRoutes registers public system endpoints (health, version).

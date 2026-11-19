@@ -1,0 +1,12 @@
+{
+  "description": "浏览海外漫剧剧本、试读前几集并查看优惠后下单购买；管理员可上架剧本、管理题材与灵活调整价格。",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  },
+  "title": "至简海漫 HAIMAN · 出海漫剧剧本平台",
+  "language": "zh-CN"
+}
