@@ -28,7 +28,7 @@ const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 
 /** 任务信息存 sessionStorage：页面刷新 / 热更新后仍能恢复进度并在完成时回填 */
 const JOB_KEY = 'haiman-ai-job-v1'
-type SavedJob = { id: string; url: string; cookie: string; startedAt: number }
+type SavedJob = { id: string; url: string; startedAt: number }
 
 const STATUS_TEXT: Record<string, string> = {
   queued: '排队中',
@@ -91,7 +91,6 @@ function fmtElapsed(ms: number): string {
 export function AiGenerate({ onApply }: Props) {
   const { toast } = useStore()
   const [url, setUrl] = useState('')
-  const [cookie, setCookie] = useState('')
   const [series, setSeries] = useState<GenSeries | null>(null)
   const [inspecting, setInspecting] = useState(false)
   const [job, setJob] = useState<GenJob | null>(null)
@@ -133,7 +132,6 @@ export function AiGenerate({ onApply }: Props) {
     }
     if (!saved?.id) return
     setUrl(saved.url || '')
-    setCookie(saved.cookie || '')
     startedAt.current = saved.startedAt || Date.now()
     setElapsed(Date.now() - startedAt.current)
     setBusy(true)
@@ -254,7 +252,7 @@ export function AiGenerate({ onApply }: Props) {
     setInspecting(true)
     setSeries(null)
     try {
-      const info = await inspectSeries({ url: url.trim(), cookie: cookie.trim() })
+      const info = await inspectSeries(url.trim())
       setSeries(info)
       toast(`《${info.title}》共识别到 ${info.episode_count} 集，请核对`)
     } catch (e) {
@@ -277,14 +275,11 @@ export function AiGenerate({ onApply }: Props) {
     stopTicker()
     ticker.current = window.setInterval(() => setElapsed(Date.now() - startedAt.current), 1000)
     try {
-      const created = await startJob({
-        url: url.trim(),
-        cookie: cookie.trim(),
-      })
+      const created = await startJob(url.trim())
       setJob(created)
       sessionStorage.setItem(
         JOB_KEY,
-        JSON.stringify({ id: created.id, url: url.trim(), cookie: cookie.trim(), startedAt: startedAt.current }),
+        JSON.stringify({ id: created.id, url: url.trim(), startedAt: startedAt.current }),
       )
       poll(created.id)
     } catch (e) {
@@ -414,22 +409,6 @@ export function AiGenerate({ onApply }: Props) {
             />
           </Field>
         </div>
-        <div className="md:col-span-2">
-          <Field label="Cookie（锁定剧集时需要）" hint="从浏览器开发者工具复制 Cookie 头，仅本次使用">
-            <textarea
-              rows={2}
-              className={cn(inputCls, 'h-auto py-2 text-xs leading-relaxed')}
-              value={cookie}
-              onChange={(e) => {
-                setCookie(e.target.value)
-                setSeries(null)
-                setExisting(null)
-              }}
-              placeholder="__Secure-better-auth.session_token=...;"
-              disabled={busy || inspecting}
-            />
-          </Field>
-        </div>
         <Field label="模型 API Base">
           <input className={inputCls} value="由服务端 .env 配置" disabled />
         </Field>
@@ -496,7 +475,7 @@ export function AiGenerate({ onApply }: Props) {
                 共 {series.episode_count} 集
               </span>
             </p>
-            <span className="text-xs text-ink-400">若集数不对，请检查链接与 Cookie</span>
+            <span className="text-xs text-ink-400">若集数不对，请检查链接是否正确</span>
           </div>
           <div className="mt-3 grid max-h-40 grid-cols-4 gap-1.5 overflow-auto pr-1 sm:grid-cols-6 lg:grid-cols-8">
             {series.episodes.map((episode) => (

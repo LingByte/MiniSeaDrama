@@ -129,9 +129,14 @@ func (h *Handlers) AIInspect(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeBadRequest, "请填写 ShortFlix 剧目链接"))
 		return
 	}
+	cookie, err := shortflixCookieOrFill(body.Cookie)
+	if err != nil {
+		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "ShortFlix 自动登录失败："+err.Error()))
+		return
+	}
 	raw, _ := json.Marshal(map[string]any{
 		"url":    strings.TrimSpace(body.URL),
-		"cookie": body.Cookie,
+		"cookie": cookie,
 	})
 	resp, err := doPython(c, http.MethodPost, "/api/inspect", raw, inspectHTTPClient)
 	if err != nil {
@@ -183,10 +188,15 @@ func (h *Handlers) AICreateJob(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "服务端未配置 AI_API_KEY"))
 		return
 	}
+	cookie, err := shortflixCookieOrFill(body.Cookie)
+	if err != nil {
+		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "ShortFlix 自动登录失败："+err.Error()))
+		return
+	}
 	payload := map[string]any{
 		"source":          "online",
 		"url":             strings.TrimSpace(body.URL),
-		"cookie":          body.Cookie,
+		"cookie":          cookie,
 		"subtitle_source": "auto",
 		"engine":          "bcut",
 		"workers":         3,
