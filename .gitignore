@@ -29,9 +29,7 @@ Thumbs.db
 .env.local
 *.pem
 *.key
-# 保留 configs/ 下的模板 .env 文件
-!configs/.env
-!configs/.env.prod
+# 只保留不含密钥的模板；configs/.env 含真实密钥，禁止提交
 !configs/.env.example
 
 # Build

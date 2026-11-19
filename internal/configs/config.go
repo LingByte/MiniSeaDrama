@@ -427,6 +427,12 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("APP_JWT_ENABLED"); v != "" {
 		cfg.JWT.Enabled = strings.EqualFold(v, "true") || v == "1"
 	}
+	if v := os.Getenv("APP_JWT_ACCESS_TTL"); v != "" {
+		cfg.JWT.AccessTTL = v
+	}
+	if v := os.Getenv("APP_JWT_REFRESH_TTL"); v != "" {
+		cfg.JWT.RefreshTTL = v
+	}
 	// Docs
 	if v := os.Getenv("APP_DOCS_ENABLED"); v != "" {
 		cfg.Docs.Enabled = strings.EqualFold(v, "true") || v == "1"
@@ -505,6 +511,16 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("APP_FALLBACK_MESSAGE"); v != "" {
 		cfg.Fallback.DefaultMessage = v
 	}
+}
+
+// LoadEnvFile loads KEY=VALUE pairs from a .env file into the process
+// environment. Existing environment variables are never overwritten.
+func LoadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return loadDotEnv(data)
 }
 
 // InitDB creates a database connection based on the configuration.

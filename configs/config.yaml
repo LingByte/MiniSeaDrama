@@ -3,9 +3,9 @@
 
 server:
   port: 8080
-  readTimeout: 15s
-  writeTimeout: 15s
-  idleTimeout: 60s
+  readTimeout: 5m          # 需容纳 Word 大文件上传
+  writeTimeout: 5m         # 生图接口单次约 1 分钟，不能被 15s 截断
+  idleTimeout: 120s
 
 database:
   driver: sqlite          # mysql | postgres | sqlite
@@ -57,7 +57,7 @@ jwt:
   enabled: false
   secret: "change-me-in-prod-32bytes!"
   issuer: miniseadrama
-  accessTTL: 15m
+  accessTTL: 12h          # 管理端长期在线；生成一次剧本可能超过 15 分钟
   refreshTTL: 168h        # 7 days
 
 # Internationalization (ling-base/i18n)
