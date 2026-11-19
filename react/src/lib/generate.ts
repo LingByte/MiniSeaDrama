@@ -66,11 +66,6 @@ export interface GenJob {
   error?: string | null
 }
 
-export interface GenRequest {
-  url: string
-  cookie: string
-}
-
 /** 工作目录里已存在的产物（任务未完成时也能读取） */
 export interface ExistingArtifact {
   key: string
@@ -115,11 +110,11 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
-/** 开始前识别剧目集数，便于人工核对链接与 Cookie 是否正确 */
-export async function inspectSeries(input: GenRequest): Promise<GenSeries> {
+/** 开始前识别剧目集数，便于人工核对链接是否正确（Cookie 由后端自动登录获取） */
+export async function inspectSeries(url: string): Promise<GenSeries> {
   const data = await json<Partial<GenSeries>>('/inspect', {
     method: 'POST',
-    body: JSON.stringify({ url: input.url, cookie: input.cookie }),
+    body: JSON.stringify({ url }),
   })
   if (!data || !Array.isArray(data.episodes)) {
     throw new Error('识别接口返回格式异常，请确认 Go 后端已重启到最新版本')
@@ -133,13 +128,10 @@ export async function inspectSeries(input: GenRequest): Promise<GenSeries> {
   }
 }
 
-export function startJob(input: GenRequest): Promise<GenJob> {
+export function startJob(url: string): Promise<GenJob> {
   return json<GenJob>('/jobs', {
     method: 'POST',
-    body: JSON.stringify({
-      url: input.url,
-      cookie: input.cookie,
-    }),
+    body: JSON.stringify({ url }),
   })
 }
 
