@@ -141,6 +141,9 @@ type TokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int64  `json:"expires_in"`
 	TokenType    string `json:"token_type"`
+	Role         string `json:"role,omitempty"`
+	Email        string `json:"email,omitempty"`
+	Username     string `json:"username,omitempty"`
 }
 
 // File storage DTOs

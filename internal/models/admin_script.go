@@ -11,7 +11,8 @@ import (
 // 剧本表单字段较多且由前端演进，这里以 JSON 原文保存，避免频繁改表。
 type AdminScript struct {
 	ScriptID  string    `gorm:"primaryKey;size:64" json:"id"`
-	Payload   string    `gorm:"type:text" json:"-"`
+	// longtext：整剧试读/AI 分集正文常远超 MySQL TEXT 64KB 上限
+	Payload   string    `gorm:"type:longtext" json:"-"`
 	FileName  string    `gorm:"size:255" json:"fileName,omitempty"`
 	FileSize  int64     `json:"fileSize,omitempty"`
 	FilePath  string    `gorm:"size:500" json:"-"`

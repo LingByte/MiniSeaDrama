@@ -80,20 +80,39 @@ func (h *Handlers) registerAdminRoutes(r *humax.Group) {
 		admin.GET("/all", h.AdminAll)
 		admin.POST("/scripts", h.CreateAdminScript)
 		admin.PUT("/scripts/:id", h.UpsertAdminScript)
+		admin.PATCH("/scripts/:id", h.PatchAdminScript)
 		admin.DELETE("/scripts/:id", h.DeleteAdminScript)
 		admin.POST("/scripts/:id/file", h.UploadAdminScriptFile)
+		admin.POST("/pricing", h.AdminPricing)
+		admin.POST("/orders/:id/refund", h.AdminRefundOrder)
 	}
+
+	// 买家订单 + 易支付（ling-base/payment/epay）
+	r.GET("/api/v1/orders", h.ListOrders)
+	r.POST("/api/v1/orders", h.CreateOrder)
+	r.POST("/api/v1/orders/:id/pay", h.PayOrder)
+	r.GET("/api/v1/pay/status", h.PayStatus)
+	r.GET("/api/v1/pay/notify", h.PayNotify)
+	r.POST("/api/v1/pay/notify", h.PayNotify)
+	// 浏览器回跳：落到前端 hash 路由
+	r.GET("/pay/return", h.PayReturnRedirect)
 
 	ai := r.Group("/api/v1/ai")
 	{
+		ai.GET("/config", h.AIConfig)
+		ai.GET("/catalog", h.AICatalog)
 		ai.POST("/inspect", h.AIInspect)
 		ai.GET("/artifacts", h.AIExistingArtifacts)
 		ai.GET("/artifacts/file", h.AIExistingArtifactFile)
 		ai.POST("/jobs", h.AICreateJob)
+		ai.GET("/jobs", h.AIListJobs)
 		ai.GET("/jobs/:id", h.AIGetJob)
 		ai.POST("/jobs/:id/pause", h.AIPauseJob)
 		ai.POST("/jobs/:id/resume", h.AIResumeJob)
+		ai.POST("/jobs/:id/cancel", h.AICancelJob)
 		ai.GET("/jobs/:id/files/:key", h.AIGetJobFile)
+		ai.GET("/jobs/:id/episodes/:n/subtitle", h.AIGetJobEpisodeSubtitle)
+		ai.POST("/jobs/:id/episodes/:n/subtitle/retry", h.AIRetryJobEpisodeSubtitle)
 		ai.POST("/cover", h.AIGenerateCover)
 	}
 
@@ -137,6 +156,7 @@ func (h *Handlers) registerUserRoutes(r *humax.Group) {
 
 // registerFileRoutes registers file upload/download/delete endpoints.
 func (h *Handlers) registerFileRoutes(r *humax.Group) {
+	r.GET("/api/v1/media", h.ServeSignedMedia) // 签名访问，公开路径
 	files := r.Group("/api/v1/files")
 	{
 		files.POST("/upload", h.UploadFile)

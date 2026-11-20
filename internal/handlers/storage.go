@@ -4,7 +4,9 @@ package handlers
 
 import (
 	"fmt"
+	"mime"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,11 +67,15 @@ func (h *Handlers) UploadFile(c *gin.Context) {
 		return
 	}
 
+	accessURL, _ := pkgstorage.SignedURL(key, pkgstorage.DisplayURLTTL)
+	if accessURL == "" {
+		accessURL = pkgstorage.PublicURL(key)
+	}
 	respgin.Created(c, types.FileUploadResponse{
 		Key:       key,
 		Name:      filename,
 		Size:      file.Size,
-		PublicURL: pkgstorage.PublicURL(key),
+		PublicURL: accessURL,
 	})
 }
 
@@ -91,6 +97,31 @@ func (h *Handlers) DownloadFile(c *gin.Context) {
 
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(key)))
 	c.DataFromReader(200, size, "application/octet-stream", reader, nil)
+}
+
+// ServeSignedMedia 校验 HMAC 签名后流式返回对象（封面展示 / 剧本下载）。
+// Query: key, exp, sig
+func (h *Handlers) ServeSignedMedia(c *gin.Context) {
+	key := sanitizePath(c.Query("key"))
+	exp, _ := strconv.ParseInt(c.Query("exp"), 10, 64)
+	sig := strings.TrimSpace(c.Query("sig"))
+	if !pkgstorage.VerifyMedia(key, exp, sig) {
+		respgin.WriteError(c, response.New(response.CodeForbidden, "链接已过期或无效，请重新获取"))
+		return
+	}
+	reader, size, err := pkgstorage.Read(key)
+	if err != nil {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "文件不存在或已清理"))
+		return
+	}
+	defer reader.Close()
+	ct := mime.TypeByExtension(filepath.Ext(key))
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Header("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, filepath.Base(key)))
+	c.DataFromReader(200, size, ct, reader, nil)
 }
 
 // DeleteFile handles file deletion.

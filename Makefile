@@ -5,10 +5,11 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 LDFLAGS := -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)
+DIST_DIR := dist
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build run dev debug test test-race test-cover coverage-badge benchmark vet lint fmt fmt-check tidy vuln clean docker-build docker-up docker-down dev-deps seed migrate migrate-down migrate-status release release-patch release-minor release-major help
+.PHONY: all build run dev debug test test-race test-cover coverage-badge benchmark vet lint fmt fmt-check tidy vuln clean docker-build docker-up docker-down dev-deps seed migrate migrate-down migrate-status release release-patch release-minor release-major build-web build-linux build-linux-amd64 build-linux-arm64 package-linux help
 
 all: build
 
@@ -105,15 +106,15 @@ docker-down:
 dev-deps:
 	docker compose -f docker/docker-compose.yml --profile dev up -d
 
-## seed: 插入示例数据（方便开发调试）
+## init-db: AutoMigrate 建表后启动服务（等价 go run ./cmd/server -init）
+init-db:
+	@echo "==> migrate schema (-init) then start..."
+	go run -ldflags "$(LDFLAGS)" ./cmd/server -init
+
+## seed: 写入/更新 ADMIN_* 管理员后启动服务（不做 migration；需表已存在）
 seed:
-	@echo "==> 插入示例数据..."
-	@go run -ldflags "$(LDFLAGS)" ./cmd/... -seed 2>/dev/null || \
-		echo "提示: 在 cmd/server/main.go 中实现 -seed flag 或手动执行 SQL:"
-	@echo "  INSERT INTO users (name, email, phone) VALUES"
-	@echo "    ('Alice', 'alice@example.com', '13800000001'),"
-	@echo "    ('Bob',   'bob@example.com',   '13800000002'),"
-	@echo "    ('Carol', 'carol@example.com', '13800000003');"
+	@echo "==> seeding admin from ADMIN_* then start..."
+	go run -ldflags "$(LDFLAGS)" ./cmd/server -seed
 
 ## migrate: 执行数据库迁移
 migrate:
@@ -162,6 +163,35 @@ release-major:
 	echo "→ 打 tag: $$NEXT"; \
 	git tag -a $$NEXT -m "Release $$NEXT"; \
 	git push origin $$NEXT'
+
+## build-web: 构建前端到 web/dist
+build-web:
+	@echo "Building web (vite)…"
+	@cd web && npm run build
+
+## build-linux: 交叉编译 Linux amd64 二进制
+build-linux: build-linux-amd64
+
+## build-linux-amd64: 交叉编译 Linux amd64（CGO 关闭）
+build-linux-amd64:
+	@echo "Building Linux amd64 binary (VERSION=$(VERSION))…"
+	@mkdir -p $(DIST_DIR)
+	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-amd64 ./cmd/server
+	@cp $(DIST_DIR)/$(APP)-linux-amd64 $(DIST_DIR)/$(APP)
+	@echo "Output: $(DIST_DIR)/$(APP)  (and $(APP)-linux-amd64)"
+
+## build-linux-arm64: 交叉编译 Linux arm64
+build-linux-arm64:
+	@echo "Building Linux arm64 binary (VERSION=$(VERSION))…"
+	@mkdir -p $(DIST_DIR)
+	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-arm64 ./cmd/server
+	@echo "Output: $(DIST_DIR)/$(APP)-linux-arm64"
+
+## package-linux: 先构建前端，再交叉编译 Linux amd64
+package-linux: build-web build-linux
+	@mkdir -p $(DIST_DIR)/web
+	@cp -R web/dist/. $(DIST_DIR)/web/
+	@echo "Packaged: $(DIST_DIR)/$(APP) + $(DIST_DIR)/web/"
 
 ## help: 显示此帮助
 help:

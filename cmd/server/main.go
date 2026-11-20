@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/LingByte/miniseadrama/internal/configs"
@@ -15,6 +17,7 @@ import (
 	"github.com/LingByte/miniseadrama/internal/listeners"
 	localmw "github.com/LingByte/miniseadrama/internal/middlewares"
 	"github.com/LingByte/miniseadrama/internal/models"
+	"github.com/LingByte/miniseadrama/internal/seed"
 	"github.com/LingByte/miniseadrama/pkg/apidocs"
 	"github.com/LingByte/miniseadrama/pkg/bootstrap"
 	pkgcache "github.com/LingByte/miniseadrama/pkg/cache"
@@ -44,6 +47,10 @@ var (
 )
 
 func main() {
+	doInit := flag.Bool("init", false, "run DB AutoMigrate, then start the server")
+	doSeed := flag.Bool("seed", false, "upsert ADMIN_* into DB, then start the server (no migrate)")
+	flag.Parse()
+
 	info := &handlers.AppInfo{
 		Name:      "miniseadrama",
 		Version:   Version,
@@ -51,10 +58,11 @@ func main() {
 		GitCommit: GitCommit,
 	}
 
-	// Load configuration
-	// 先加载 configs/.env（存在则生效，不覆盖已设置的环境变量），再读 YAML
-	if err := configs.LoadEnvFile("configs/.env"); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "failed to load configs/.env: %v\n", err)
+	// Load configuration: root .env then configs/.env (existing env vars win)
+	for _, envPath := range []string{".env", "configs/.env"} {
+		if err := configs.LoadEnvFile(envPath); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "failed to load %s: %v\n", envPath, err)
+		}
 	}
 	cfg, err := configs.Load("configs/config.yaml")
 	if err != nil {
@@ -102,7 +110,8 @@ func main() {
 		bootstrap.WithShutdownTimeout(15 * time.Second),
 	}
 
-	// Database initialization + migration
+	// Database：默认只连接，不自动 migration。
+	// -init → AutoMigrate 后继续启动；-seed → 初始化 ADMIN_* 后继续启动。
 	var db *gorm.DB
 	if cfg.Database.DSN != "" {
 		db, err = configs.InitDB(cfg.Database)
@@ -110,21 +119,50 @@ func main() {
 			logger.Lg.Error("failed to init database", zap.Error(err))
 			os.Exit(1)
 		}
-		// dev/test: AutoMigrate; prod: manual SQL migrations
-		if cfg.App.Environment == "dev" || cfg.App.Environment == "test" {
-			appOpts = append(appOpts, bootstrap.WithAutoMigrate(db, &models.User{}, &models.AdminScript{}))
+		if *doInit {
+			if err := migrateSchema(db); err != nil {
+				logger.Lg.Error("migration failed", zap.Error(err))
+				os.Exit(1)
+			}
+			logger.Lg.Info("database migration completed (-init)")
+		} else if err := ensureAdminScriptPayloadLongtext(db); err != nil {
+			// 非 -init 启动也把 payload 升到 LONGTEXT，避免 AI 整剧正文触发 TEXT 64KB 写失败
+			logger.Lg.Warn("ensure admin_scripts.payload longtext failed", zap.Error(err))
 		}
+		if *doSeed {
+			if err := runSeed(db); err != nil {
+				logger.Lg.Error("seed failed", zap.Error(err))
+				os.Exit(1)
+			}
+			logger.Lg.Info("database seed completed (-seed)")
+		}
+	} else if *doInit || *doSeed {
+		logger.Lg.Error("database.dsn is empty; set APP_DATABASE_DSN before -init/-seed")
+		os.Exit(1)
 	}
 
-	// Initialize object storage (pkg/storage, default local backend)
+	// Initialize object storage (pkg/storage, default local backend + HMAC signed media URLs)
+	displayTTL, _ := time.ParseDuration(cfg.Storage.DisplayURLTTL)
+	downloadTTL, _ := time.ParseDuration(cfg.Storage.DownloadURLTTL)
+	signSecret := []byte(strings.TrimSpace(cfg.Storage.SignSecret))
+	if len(signSecret) == 0 {
+		signSecret = []byte(cfg.JWT.Secret)
+	}
 	if err = pkgstorage.Init(
 		cfg.Storage.Driver, cfg.Storage.Root, cfg.Storage.Region,
 		cfg.Storage.Endpoint, cfg.Storage.AccessKey, cfg.Storage.SecretKey,
 		cfg.Storage.PublicURLBase, cfg.Storage.MaxFileSize,
+		pkgstorage.InitOptions{
+			SignSecret:  signSecret,
+			DisplayTTL:  displayTTL,
+			DownloadTTL: downloadTTL,
+			Private:     cfg.Storage.Private,
+		},
 	); err != nil {
 		logger.Lg.Error("failed to init storage", zap.Error(err))
 		os.Exit(1)
 	}
+	logger.Lg.Info("storage ready", zap.String("driver", pkgstorage.DriverName), zap.String("root", cfg.Storage.Root))
 
 	// Initialize cache (pkg/cache, default memory backend)
 	if err = pkgcache.Init(cfg.Cache.Driver, cfg.Cache.DefaultTTL, cfg.Cache.CleanupInterval); err != nil {
@@ -254,6 +292,9 @@ func (c *httpServerComponent) Start(ctx context.Context) error {
 			"/api/v1/auth/login", "/api/v1/auth/refresh",
 			"/api/v1/register",
 			"/api/v1/bootstrap",
+			"/api/v1/media", // 封面等签名 URL，img 标签无法带 JWT
+			"/api/v1/pay/notify",
+			"/pay/return",
 			"/docs", "/openapi",
 		)))
 	}
@@ -271,6 +312,7 @@ func (c *httpServerComponent) Start(ctx context.Context) error {
 	// Create handlers and register routes (humax.Group: Gin + OpenAPI docs)
 	h := handlers.New(c.cfg, *c.info, c.db, c.events)
 	h.Register(r, api)
+	h.StartPayReconciler()
 
 	c.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", c.cfg.Server.Port),
@@ -299,4 +341,35 @@ func (c *httpServerComponent) Stop(ctx context.Context) error {
 
 func (c *httpServerComponent) IsRunning() bool {
 	return c.server != nil
+}
+
+func migrateSchema(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	return db.AutoMigrate(&models.User{}, &models.AdminScript{}, &models.Order{})
+}
+
+// ensureAdminScriptPayloadLongtext 把既有 TEXT 列升级为 LONGTEXT（幂等，仅 MySQL）。
+func ensureAdminScriptPayloadLongtext(db *gorm.DB) error {
+	if db == nil || db.Dialector.Name() != "mysql" {
+		return nil
+	}
+	return db.Exec("ALTER TABLE admin_scripts MODIFY COLUMN payload LONGTEXT").Error
+}
+
+// runSeed upserts the ADMIN_* account（不做 migration；需表已存在或同时加 -init）。
+func runSeed(db *gorm.DB) error {
+	admin, err := seed.LoadAdminEnv()
+	if err != nil {
+		return err
+	}
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if err := seed.UpsertAdmin(db, admin); err != nil {
+		return err
+	}
+	fmt.Printf("seed ok: admin %s (%s)\n", admin.Email, admin.Username)
+	return nil
 }

@@ -8,28 +8,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
+	"github.com/LingByte/miniseadrama/internal/models"
+	"github.com/LingByte/miniseadrama/internal/pipeline"
+	"github.com/LingByte/miniseadrama/internal/pipeline/jobs"
 	"github.com/LingByte/miniseadrama/pkg/common/response"
 	respgin "github.com/LingByte/miniseadrama/pkg/common/response/gin"
+	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 
 	"github.com/gin-gonic/gin"
 )
 
-var (
-	aiHTTPClient      = &http.Client{Timeout: 180 * time.Second}
-	jobHTTPClient     = &http.Client{Timeout: 60 * time.Second}
-	inspectHTTPClient = &http.Client{Timeout: 180 * time.Second}
-	// pyCandidateIdx 记住最近一次可用的生成服务地址（0=配置地址，1=WSL 网关）
-	pyCandidateIdx int32
-)
+var aiHTTPClient = &http.Client{Timeout: 180 * time.Second}
+
+const docxMediaType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 func envOr(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
@@ -44,79 +41,72 @@ func aiTextModel() string {
 	return envOr("AI_TEXT_MODEL", "claude-opus-5.5特价")
 }
 func aiImageModel() string { return envOr("AI_IMAGE_MODEL", "tt-image-2.5") }
-func pyServiceURL() string {
-	return strings.TrimRight(envOr("PY_SERVICE_URL", "http://127.0.0.1:8000"), "/")
+
+// AIConfig 返回服务端已配置的模型信息（不含 API Key），供管理端只读展示。
+func (h *Handlers) AIConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"base_url":    aiBaseURL(),
+		"text_model":  aiTextModel(),
+		"image_model": aiImageModel(),
+		"has_api_key": aiAPIKey() != "",
+	})
 }
 
-// pyCandidates 返回可尝试的生成服务地址。
-// Go 跑在 WSL、miniseadrama 跑在 Windows 时，WSL 内的 127.0.0.1 指向 WSL 自身，
-// 需要改走 WSL 默认网关（即 Windows 主机）才能访问到 8000 端口。
-func pyCandidates() []string {
-	base := pyServiceURL()
-	out := []string{base}
-	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
-		return out
-	}
-	if gw := wslGatewayIP(); gw != "" {
-		alt := *u
-		alt.Host = net.JoinHostPort(gw, u.Port())
-		if alt.String() != base {
-			out = append(out, alt.String())
+func writePipelineErr(c *gin.Context, err error) {
+	if status, msg, ok := pipeline.APIErrorStatus(err); ok {
+		code := response.CodeBadRequest
+		switch status {
+		case 404:
+			code = response.CodeNotFound
+		case 403:
+			code = response.CodeForbidden
 		}
+		respgin.WriteError(c, response.New(code, msg))
+		return
 	}
-	return out
+	respgin.WriteError(c, response.New(response.CodeBadRequest, err.Error()))
 }
 
-// wslGatewayIP 从 /proc/net/route 读取默认网关；非 WSL/Linux 环境返回空字符串。
-func wslGatewayIP() string {
-	data, err := os.ReadFile("/proc/net/route")
+// AICatalog 浏览 ShortFlix 短剧库（封面 + 标题），支持 cursor 分页与 q 搜索。
+func (h *Handlers) AICatalog(c *gin.Context) {
+	cookie, err := shortflixCookieOrFill(c.Query("cookie"))
 	if err != nil {
-		return ""
+		cookie = ""
 	}
-	for _, line := range strings.Split(string(data), "\n")[1:] {
-		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[1] != "00000000" {
-			continue
+	var titles []string
+	if h.db != nil {
+		var rows []models.AdminScript
+		if err := h.db.WithContext(c.Request.Context()).Find(&rows).Error; err == nil {
+			for i := range rows {
+				script := rows[i].ToScript()
+				if t := str(script["title"]); t != "" {
+					titles = append(titles, t)
+				}
+				if t := str(script["enTitle"]); t != "" {
+					titles = append(titles, t)
+				}
+			}
 		}
-		value, err := strconv.ParseUint(fields[2], 16, 32)
-		if err != nil {
-			continue
-		}
-		return fmt.Sprintf("%d.%d.%d.%d", byte(value), byte(value>>8), byte(value>>16), byte(value>>24))
 	}
-	return ""
-}
-
-// doPython 按候选地址依次请求生成服务，成功后记住可用地址。
-func doPython(c *gin.Context, method, path string, body []byte, client *http.Client) (*http.Response, error) {
-	candidates := pyCandidates()
-	start := int(atomic.LoadInt32(&pyCandidateIdx)) % len(candidates)
-	var lastErr error
-	for i := 0; i < len(candidates); i++ {
-		idx := (start + i) % len(candidates)
-		var reader io.Reader
-		if body != nil {
-			reader = bytes.NewReader(body)
-		}
-		req, err := http.NewRequestWithContext(c.Request.Context(), method, candidates[idx]+path, reader)
-		if err != nil {
-			return nil, err
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if idx != start {
-			atomic.StoreInt32(&pyCandidateIdx, int32(idx))
-		}
-		return resp, nil
+	refresh := c.Query("refresh") == "1" || c.Query("refresh") == "true"
+	page, err := pipeline.ListCatalogPage(
+		cookie,
+		strings.TrimSpace(c.Query("cursor")),
+		strings.TrimSpace(c.Query("q")),
+		48,
+		titles,
+		refresh,
+	)
+	if err != nil {
+		writePipelineErr(c, err)
+		return
 	}
-	return nil, lastErr
+	c.JSON(http.StatusOK, gin.H{
+		"items":       page.Items,
+		"count":       len(page.Items),
+		"next_cursor": page.NextCursor,
+		"has_more":    page.HasMore,
+	})
 }
 
 // AIInspect 识别剧目集数：开始生成前先让运营核对集数是否正确。
@@ -134,18 +124,12 @@ func (h *Handlers) AIInspect(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "ShortFlix 自动登录失败："+err.Error()))
 		return
 	}
-	raw, _ := json.Marshal(map[string]any{
-		"url":    strings.TrimSpace(body.URL),
-		"cookie": cookie,
-	})
-	resp, err := doPython(c, http.MethodPost, "/api/inspect", raw, inspectHTTPClient)
+	payload, err := pipeline.InspectSeries(strings.TrimSpace(body.URL), pipeline.ParseCookieHeader(cookie))
 	if err != nil {
-		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "无法连接生成服务，请先启动 miniseadrama（python run.py --host 0.0.0.0）"))
+		writePipelineErr(c, err)
 		return
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	c.Data(resp.StatusCode, "application/json; charset=utf-8", data)
+	c.JSON(http.StatusOK, payload)
 }
 
 // AIExistingArtifacts 列出该剧工作目录里已存在的产物（任务未完成时也能用）。
@@ -155,7 +139,12 @@ func (h *Handlers) AIExistingArtifacts(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeBadRequest, "请提供 ShortFlix 剧目链接"))
 		return
 	}
-	h.proxyPython(c, "/api/artifacts?url="+url.QueryEscape(rawURL), jobHTTPClient)
+	payload, err := pipeline.ListArtifacts(rawURL)
+	if err != nil {
+		writePipelineErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // AIExistingArtifactFile 下载已存在的产物文件。
@@ -166,11 +155,12 @@ func (h *Handlers) AIExistingArtifactFile(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeBadRequest, "请提供剧目链接与产物类型"))
 		return
 	}
-	h.proxyPython(
-		c,
-		"/api/artifacts/file?url="+url.QueryEscape(rawURL)+"&key="+url.QueryEscape(key),
-		aiHTTPClient,
-	)
+	path, name, err := pipeline.ResolveArtifactPath(rawURL, key)
+	if err != nil {
+		writePipelineErr(c, err)
+		return
+	}
+	serveArtifactFile(c, path, name)
 }
 
 // AICreateJob 用服务端密钥创建整剧生成任务（前端不接触 API Key）。
@@ -193,75 +183,195 @@ func (h *Handlers) AICreateJob(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "ShortFlix 自动登录失败："+err.Error()))
 		return
 	}
-	payload := map[string]any{
-		"source":          "online",
-		"url":             strings.TrimSpace(body.URL),
-		"cookie":          cookie,
-		"subtitle_source": "auto",
-		"engine":          "bcut",
-		"workers":         3,
-		"batch_size":      3,
+	params, err := pipeline.ValidateJobParams(map[string]any{
+		"url":    strings.TrimSpace(body.URL),
+		"cookie": pipeline.ParseCookieHeader(cookie),
+		"engine": "bcut",
+		"workers": 3, "batch_size": 3,
 		"llm": map[string]any{
-			"base_url":    aiBaseURL(),
-			"api_key":     key,
-			"model":       aiTextModel(),
-			"temperature": 0.8,
-			"max_tokens":  8192,
+			"base_url": aiBaseURL(), "api_key": key, "model": aiTextModel(),
+			"temperature": 0.8, "max_tokens": 8192, "timeout": 900,
 		},
-	}
-	raw, _ := json.Marshal(payload)
-	resp, err := doPython(c, http.MethodPost, "/api/jobs", raw, jobHTTPClient)
+	})
 	if err != nil {
-		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "无法连接生成服务，请先启动 miniseadrama（python run.py --host 0.0.0.0）"))
+		respgin.WriteError(c, response.New(response.CodeBadRequest, err.Error()))
 		return
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	c.Data(resp.StatusCode, "application/json; charset=utf-8", data)
+	if err := pipeline.CheckFFmpeg(fmt.Sprint(params["ffmpeg"])); err != nil {
+		respgin.WriteError(c, response.New(response.CodeBadRequest, err.Error()))
+		return
+	}
+	_ = pipeline.EnsureDirs()
+	job := jobs.DefaultManager.Create(params)
+	c.JSON(http.StatusOK, job.ToDict(false))
+}
+
+// AIListJobs 列出近期生成任务（后台多任务面板用）。
+func (h *Handlers) AIListJobs(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"items":       jobs.DefaultManager.List(),
+		"max_workers": jobs.DefaultManager.MaxWorkers(),
+	})
 }
 
 // AIGetJob 查询生成任务进度。
 func (h *Handlers) AIGetJob(c *gin.Context) {
-	h.proxyPython(c, "/api/jobs/"+c.Param("id"), jobHTTPClient)
+	job := jobs.DefaultManager.Get(c.Param("id"))
+	if job == nil {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务不存在。"))
+		return
+	}
+	c.JSON(http.StatusOK, job.ToDict(false))
 }
 
 // AIGetJobFile 下载生成任务产物（Word / meta.json）。
 func (h *Handlers) AIGetJobFile(c *gin.Context) {
-	h.proxyPython(c, "/api/jobs/"+c.Param("id")+"/files/"+c.Param("key"), aiHTTPClient)
+	job := jobs.DefaultManager.Get(c.Param("id"))
+	if job == nil || job.Result == nil {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务结果不存在。"))
+		return
+	}
+	key := c.Param("key")
+	workdir := filepath.Clean(fmt.Sprint(job.Result["workdir"]))
+	var artifacts []map[string]any
+	switch raw := job.Result["artifacts"].(type) {
+	case []map[string]any:
+		artifacts = raw
+	case []any:
+		for _, item := range raw {
+			if m, ok := item.(map[string]any); ok {
+				artifacts = append(artifacts, m)
+			}
+		}
+	}
+	var artifact map[string]any
+	for _, item := range artifacts {
+		if fmt.Sprint(item["key"]) == key {
+			artifact = item
+			break
+		}
+	}
+	if artifact == nil {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "文件不存在。"))
+		return
+	}
+	path := filepath.Clean(fmt.Sprint(artifact["path"]))
+	rel, err := filepath.Rel(workdir, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		respgin.WriteError(c, response.New(response.CodeForbidden, "不允许下载工作目录之外的文件。"))
+		return
+	}
+	if st, err := os.Stat(path); err != nil || st.IsDir() {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "文件已被移动或删除。"))
+		return
+	}
+	serveArtifactFile(c, path, filepath.Base(path))
+}
+
+// AIGetJobEpisodeSubtitle 查看某集字幕原文（下载成功后可读）。
+func (h *Handlers) AIGetJobEpisodeSubtitle(c *gin.Context) {
+	job := jobs.DefaultManager.Get(c.Param("id"))
+	if job == nil {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务不存在。"))
+		return
+	}
+	var episode int
+	if _, err := fmt.Sscanf(c.Param("n"), "%d", &episode); err != nil || episode < 1 {
+		respgin.WriteError(c, response.New(response.CodeBadRequest, "集数无效"))
+		return
+	}
+	workdir := job.Workdir()
+	if workdir == "" {
+		respgin.WriteError(c, response.New(response.CodeBadRequest, "任务尚未创建工作目录"))
+		return
+	}
+	content, name, err := pipeline.ReadEpisodeSubtitle(workdir, episode)
+	if err != nil {
+		writePipelineErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"number": episode, "file": name, "content": content, "status": "ok",
+	})
+}
+
+// AIRetryJobEpisodeSubtitle 对失败集（如 HTTP 502）重新拉取官方字幕。
+func (h *Handlers) AIRetryJobEpisodeSubtitle(c *gin.Context) {
+	job := jobs.DefaultManager.Get(c.Param("id"))
+	if job == nil {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务不存在。"))
+		return
+	}
+	var episode int
+	if _, err := fmt.Sscanf(c.Param("n"), "%d", &episode); err != nil || episode < 1 {
+		respgin.WriteError(c, response.New(response.CodeBadRequest, "集数无效"))
+		return
+	}
+	workdir := job.Workdir()
+	urlStr := job.ParamString("url")
+	cookie := job.ParamString("cookie")
+	job.PatchEpisodeSub(episode, "running", "")
+	result, err := pipeline.RetryEpisodeSubtitle(urlStr, cookie, workdir, episode)
+	if err != nil {
+		errMsg := err.Error()
+		if result != nil {
+			if e, ok := result["error"].(string); ok && e != "" {
+				errMsg = e
+			}
+		}
+		job.PatchEpisodeSub(episode, "fail", errMsg)
+		writePipelineErr(c, err)
+		return
+	}
+	job.PatchEpisodeSub(episode, "ok", "")
+	c.JSON(http.StatusOK, result)
 }
 
 // AIPauseJob 暂停生成任务（在安全点停下，可继续）。
 func (h *Handlers) AIPauseJob(c *gin.Context) {
-	h.jobControl(c, "pause")
+	if !jobs.DefaultManager.Pause(c.Param("id")) {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务不存在或已结束。"))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "paused": true})
 }
 
 // AIResumeJob 继续已暂停的生成任务。
 func (h *Handlers) AIResumeJob(c *gin.Context) {
-	h.jobControl(c, "resume")
-}
-
-func (h *Handlers) jobControl(c *gin.Context, action string) {
-	resp, err := doPython(
-		c,
-		http.MethodPost,
-		"/api/jobs/"+c.Param("id")+"/"+action,
-		[]byte("{}"),
-		jobHTTPClient,
-	)
-	if err != nil {
-		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "无法连接生成服务"))
+	if !jobs.DefaultManager.Resume(c.Param("id")) {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务不存在。"))
 		return
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	c.Data(resp.StatusCode, "application/json; charset=utf-8", data)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "paused": false})
 }
 
-// AIGenerateCover 用 tt-image-2.5 生成竖版 3:4 封面并回传 dataURL。
+// AICancelJob 取消生成任务。
+func (h *Handlers) AICancelJob(c *gin.Context) {
+	if !jobs.DefaultManager.Cancel(c.Param("id")) {
+		respgin.WriteError(c, response.New(response.CodeNotFound, "任务不存在。"))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func serveArtifactFile(c *gin.Context, path, filename string) {
+	if strings.EqualFold(filepath.Ext(path), ".docx") {
+		c.Header("Content-Type", docxMediaType)
+	} else if strings.EqualFold(filepath.Ext(path), ".json") {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+	} else {
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+	}
+	c.FileAttachment(path, filename)
+}
+
+// AIGenerateCover 用 tt-image-2.5 生成竖版 3:4 封面，写入对象存储后回传签名 URL。
+// 英文标题由模型直接画进海报（电影海报式排版），不走前端叠字。
 func (h *Handlers) AIGenerateCover(c *gin.Context) {
 	var body struct {
-		Prompt string `json:"prompt"`
-		Title  string `json:"title"`
+		Prompt  string `json:"prompt"`
+		Title   string `json:"title"`
+		EnTitle string `json:"enTitle"`
 	}
 	_ = c.ShouldBindJSON(&body)
 	key := aiAPIKey()
@@ -269,19 +379,17 @@ func (h *Handlers) AIGenerateCover(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "服务端未配置 AI_API_KEY"))
 		return
 	}
-	prompt := strings.TrimSpace(body.Prompt)
-	if prompt == "" {
-		prompt = strings.TrimSpace(body.Title) + " 短剧海报，人物居中，电影感光影，高清细节，画面不要文字"
+	enTitle := strings.TrimSpace(body.EnTitle)
+	if enTitle == "" {
+		enTitle = strings.TrimSpace(body.Title)
 	}
+	prompt := buildCoverPrompt(strings.TrimSpace(body.Prompt), strings.TrimSpace(body.Title), enTitle)
 	if len(prompt) > 800 {
 		prompt = prompt[:800]
 	}
 	payload := map[string]any{
-		"model":           aiImageModel(),
-		"prompt":          prompt,
-		"n":               1,
-		"size":            "1024x1365",
-		"response_format": "b64_json",
+		"model": aiImageModel(), "prompt": prompt, "n": 1,
+		"size": "1024x1365", "response_format": "b64_json",
 	}
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, aiBaseURL()+"/images/generations", bytes.NewReader(raw))
@@ -313,9 +421,17 @@ func (h *Handlers) AIGenerateCover(c *gin.Context) {
 		return
 	}
 	item := parsed.Data[0]
-	image := ""
+	var bin []byte
 	if item.B64 != "" {
-		image = "data:image/png;base64," + item.B64
+		decoded, err := base64.StdEncoding.DecodeString(item.B64)
+		if err != nil {
+			decoded, err = base64.RawStdEncoding.DecodeString(item.B64)
+		}
+		if err != nil {
+			respgin.WriteError(c, response.New(response.CodeInternal, "生图 base64 解码失败"))
+			return
+		}
+		bin = decoded
 	} else if item.URL != "" {
 		imgResp, err := aiHTTPClient.Get(item.URL)
 		if err != nil {
@@ -323,32 +439,68 @@ func (h *Handlers) AIGenerateCover(c *gin.Context) {
 			return
 		}
 		defer imgResp.Body.Close()
-		buf, _ := io.ReadAll(io.LimitReader(imgResp.Body, 20<<20))
-		image = "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf)
+		bin, _ = io.ReadAll(io.LimitReader(imgResp.Body, 20<<20))
 	}
-	if image == "" {
+	if len(bin) == 0 {
 		respgin.WriteError(c, response.New(response.CodeInternal, "生图接口未返回图片"))
 		return
 	}
-	respgin.Success(c, gin.H{"image": image})
-}
-
-// proxyPython 把只读请求透传给 Python 服务。
-func (h *Handlers) proxyPython(c *gin.Context, path string, client *http.Client) {
-	resp, err := doPython(c, http.MethodGet, path, nil, client)
-	if err != nil {
-		respgin.WriteError(c, response.New(response.CodeServiceUnavail, "无法连接生成服务"))
+	objectKey := pkgstorage.ObjectKey("covers", "ai", fmt.Sprintf("%d.png", time.Now().UnixNano()))
+	if err := pkgstorage.PutBytes(objectKey, bin); err != nil {
+		respgin.WriteError(c, response.New(response.CodeInternal, "封面写入对象存储失败："+err.Error()))
 		return
 	}
-	defer resp.Body.Close()
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	url, err := pkgstorage.SignedURL(objectKey, pkgstorage.DisplayURLTTL)
+	if err != nil {
+		respgin.WriteError(c, response.New(response.CodeInternal, "签发封面链接失败"))
+		return
 	}
-	c.Header("Content-Type", contentType)
-	if disposition := resp.Header.Get("Content-Disposition"); disposition != "" {
-		c.Header("Content-Disposition", disposition)
+	// 只回传对象 key + 临时访问 URL，禁止 data URL / base64 回写数据库
+	respgin.Success(c, gin.H{"image": url, "key": objectKey, "url": url})
+}
+
+// buildCoverPrompt 组装生图提示：保留画面描述，去掉「不要文字」类约束，并要求模型画出英文标题。
+func buildCoverPrompt(visual, cnTitle, enTitle string) string {
+	visual = stripNoTextInstructions(visual)
+	if visual == "" {
+		if cnTitle != "" {
+			visual = cnTitle + " short drama movie poster, centered characters, cinematic lighting, ultra detailed"
+		} else {
+			visual = "short drama movie poster, centered characters, cinematic lighting, ultra detailed"
+		}
 	}
-	c.Status(resp.StatusCode)
-	_, _ = io.Copy(c.Writer, resp.Body)
+	title := enTitle
+	if title == "" {
+		title = cnTitle
+	}
+	if title == "" {
+		return visual + ", vertical 3:4 poster"
+	}
+	// 明确要求模型把英文标题画进画面，并给出精确拼写
+	return visual + fmt.Sprintf(
+		". Vertical 3:4 short-drama movie poster. Prominently display the English title text \"%s\" "+
+			"as elegant cinematic poster typography near the bottom or integrated into the composition. "+
+			"Spell the title exactly as given. No other random text, logos, or watermarks.",
+		title,
+	)
+}
+
+var noTextPhrases = []string{
+	"画面不要文字", "画面不要任何文字", "不要任何文字", "不要文字",
+	"不要出现任何文字", "不要出现文字", "无文字", "纯画面无字",
+	"no text", "no title text", "without text", "without any text",
+	"no letters", "no typography", "textless",
+}
+
+func stripNoTextInstructions(prompt string) string {
+	out := prompt
+	for _, p := range noTextPhrases {
+		out = strings.ReplaceAll(out, p, "")
+		out = strings.ReplaceAll(out, strings.ToUpper(p), "")
+	}
+	// 清理多余标点空白
+	out = strings.ReplaceAll(out, "，，", "，")
+	out = strings.ReplaceAll(out, ",,", ",")
+	out = strings.ReplaceAll(out, "。。", "。")
+	return strings.TrimSpace(strings.Trim(out, "，,。.;； "))
 }

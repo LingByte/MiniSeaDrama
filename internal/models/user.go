@@ -107,6 +107,23 @@ func (User) UsernameOrEmailExists(db *gorm.DB, username, email string) (bool, er
 	return count > 0, nil
 }
 
+// UsernameExists / EmailExists 用于注册时给出更明确的冲突提示。
+func (User) UsernameExists(db *gorm.DB, username string) (bool, error) {
+	var count int64
+	if err := db.Model(&User{}).Where("username = ?", username).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (User) EmailExists(db *gorm.DB, email string) (bool, error) {
+	var count int64
+	if err := db.Model(&User{}).Where("email = ?", email).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // ListFilter holds optional filters for paginated user queries.
 type ListFilter struct {
 	Keyword string

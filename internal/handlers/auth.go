@@ -48,7 +48,7 @@ func (h *Handlers) Login(c *gin.Context) {
 
 	// Validate that at least one identifier is provided
 	if req.Username == "" && req.Email == "" {
-		respgin.WriteError(c, response.New(response.CodeBadRequest, "username or email is required"))
+		respgin.WriteError(c, response.NewI18n(response.CodeBadRequest, response.KeyAuthEmailOrUsernameRequired))
 		return
 	}
 
@@ -56,7 +56,8 @@ func (h *Handlers) Login(c *gin.Context) {
 	user, err := models.User{}.FindByUsernameOrEmail(h.db.WithContext(c.Request.Context()), req.Username, req.Email)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			respgin.WriteError(c, response.New(response.CodeUnauthorized, "invalid credentials"))
+			// 用户不存在：明确文案（勿用 CodeUnauthorized，会被 i18n 成「未授权」）
+			respgin.WriteError(c, response.NewI18n(response.CodeAuthFailed, response.KeyAuthUserNotFound))
 			return
 		}
 		respgin.WriteError(c, response.Err(response.CodeInternal))
@@ -65,13 +66,13 @@ func (h *Handlers) Login(c *gin.Context) {
 
 	// Check account status
 	if !user.IsActive() {
-		respgin.WriteError(c, response.New(response.CodeForbidden, "account is disabled"))
+		respgin.WriteError(c, response.NewI18n(response.CodeForbidden, response.KeyAuthAccountDisabled))
 		return
 	}
 
 	// Verify password using ling-base/common/password
 	if !password.Verify(req.Password, user.Password) {
-		respgin.WriteError(c, response.New(response.CodeUnauthorized, "invalid credentials"))
+		respgin.WriteError(c, response.NewI18n(response.CodeAuthFailed, response.KeyAuthPasswordWrong))
 		return
 	}
 
@@ -96,6 +97,9 @@ func (h *Handlers) Login(c *gin.Context) {
 		RefreshToken: pair.RefreshToken,
 		ExpiresIn:    pair.ExpiresIn,
 		TokenType:    pair.TokenType,
+		Role:         user.Role,
+		Email:        user.Email,
+		Username:     user.Username,
 	})
 }
 
@@ -118,7 +122,7 @@ func (h *Handlers) Refresh(c *gin.Context) {
 
 	pair, err := h.jwtAuth.Refresh(req.RefreshToken)
 	if err != nil {
-		respgin.WriteError(c, response.Err(response.CodeUnauthorized))
+		respgin.WriteError(c, response.NewI18n(response.CodeUnauthorized, response.KeyAuthInvalidToken))
 		return
 	}
 	respgin.Success(c, types.TokenResponse{

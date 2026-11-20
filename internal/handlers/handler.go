@@ -3,7 +3,10 @@
 package handlers
 
 import (
+	"crypto/rand"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/LingByte/miniseadrama/internal/constants"
@@ -116,6 +119,7 @@ func (h *Handlers) GetUser(c *gin.Context) {
 // RegisterUser creates a new user account (public registration endpoint).
 // Supports both username and email based registration.
 // If username is not provided, it defaults to the email prefix.
+// Role is always "user"; administrators are created only via -seed + ADMIN_* env.
 func (h *Handlers) RegisterUser(c *gin.Context) {
 	var req types.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -133,7 +137,7 @@ func (h *Handlers) RegisterUser(c *gin.Context) {
 	}
 
 	// If username not provided, derive from email prefix
-	username := req.Username
+	username := strings.TrimSpace(req.Username)
 	if username == "" {
 		at := indexOf(req.Email, "@")
 		if at > 0 {
@@ -143,16 +147,23 @@ func (h *Handlers) RegisterUser(c *gin.Context) {
 		}
 	}
 
-	// Check for duplicate username/email
-	exists, err := models.User{}.UsernameOrEmailExists(h.db.WithContext(c.Request.Context()), username, req.Email)
+	ctxDB := h.db.WithContext(c.Request.Context())
+	emailTaken, err := models.User{}.EmailExists(ctxDB, req.Email)
 	if err != nil {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	if exists {
-		respgin.WriteError(c, response.New(response.CodeConflict, "username or email already exists"))
+	if emailTaken {
+		respgin.WriteError(c, response.New(response.CodeConflict, "该邮箱已被注册，请直接登录或换一个邮箱"))
 		return
 	}
+	// 邮箱前缀常撞上已有用户名（如 admin）；自动换一个可用名，避免阴间「资源冲突」
+	unique, err := allocateUsername(ctxDB, username)
+	if err != nil {
+		respgin.WriteError(c, response.Err(response.CodeInternal))
+		return
+	}
+	username = unique
 
 	// Hash password using ling-base/common/password (Argon2id by default)
 	hashed, err := password.Hash(req.Password, nil)
@@ -182,7 +193,7 @@ func (h *Handlers) RegisterUser(c *gin.Context) {
 	respgin.Created(c, types.ToUserResponse(&user))
 }
 
-// CreateUser creates a new user (admin endpoint, can set role).
+// CreateUser creates a new user. Role is always "user" (admins via -seed only).
 func (h *Handlers) CreateUser(c *gin.Context) {
 	var req types.CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -199,14 +210,23 @@ func (h *Handlers) CreateUser(c *gin.Context) {
 		return
 	}
 
-	// Check for duplicate
-	exists, err := models.User{}.UsernameOrEmailExists(h.db.WithContext(c.Request.Context()), req.Username, req.Email)
+	ctxDB := h.db.WithContext(c.Request.Context())
+	nameTaken, err := models.User{}.UsernameExists(ctxDB, req.Username)
 	if err != nil {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	if exists {
-		respgin.WriteError(c, response.New(response.CodeConflict, "username or email already exists"))
+	if nameTaken {
+		respgin.WriteError(c, response.New(response.CodeConflict, "该用户名已被占用，请换一个"))
+		return
+	}
+	emailTaken, err := models.User{}.EmailExists(ctxDB, req.Email)
+	if err != nil {
+		respgin.WriteError(c, response.Err(response.CodeInternal))
+		return
+	}
+	if emailTaken {
+		respgin.WriteError(c, response.New(response.CodeConflict, "该邮箱已被注册，请直接登录或换一个邮箱"))
 		return
 	}
 
@@ -217,17 +237,13 @@ func (h *Handlers) CreateUser(c *gin.Context) {
 		return
 	}
 
-	role := req.Role
-	if role == "" {
-		role = models.UserRoleUser
-	}
-
+	// Admins can only be provisioned via `go run ./cmd/server -seed` + ADMIN_* env.
 	user := models.User{
 		Username: req.Username,
 		Email:    req.Email,
 		Phone:    req.Phone,
 		Password: hashed,
-		Role:     role,
+		Role:     models.UserRoleUser,
 		Status:   models.UserStatusActive,
 	}
 
@@ -397,4 +413,40 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// allocateUsername 若 base 可用则直接用；否则追加短后缀（邮箱前缀撞 admin 等场景）。
+func allocateUsername(db *gorm.DB, base string) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "user"
+	}
+	if len(base) > 40 {
+		base = base[:40]
+	}
+	taken, err := models.User{}.UsernameExists(db, base)
+	if err != nil {
+		return "", err
+	}
+	if !taken {
+		return base, nil
+	}
+	for i := 0; i < 8; i++ {
+		var b [2]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		cand := fmt.Sprintf("%s_%04x", base, int(b[0])<<8|int(b[1]))
+		if len(cand) > 50 {
+			cand = cand[:50]
+		}
+		taken, err = models.User{}.UsernameExists(db, cand)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return cand, nil
+		}
+	}
+	return "", fmt.Errorf("unable to allocate username")
 }
