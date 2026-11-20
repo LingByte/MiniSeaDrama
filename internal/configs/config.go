@@ -115,14 +115,18 @@ type AppConfig struct {
 // To switch to cloud storage, set driver to s3/oss/cos/minio/kodo/tos/obs/ks3
 // and fill in the corresponding credentials.
 type StorageConfig struct {
-	Driver        string `yaml:"driver"`        // local | s3 | oss | cos | minio | kodo | tos | obs | ks3
-	Root          string `yaml:"root"`          // local: root directory; cloud: bucket name
-	Region        string `yaml:"region"`        // cloud storage region
-	Endpoint      string `yaml:"endpoint"`      // custom endpoint (MinIO / S3-compatible)
-	AccessKey     string `yaml:"accessKey"`     // cloud storage AccessKey
-	SecretKey     string `yaml:"secretKey"`     // cloud storage SecretKey
-	PublicURLBase string `yaml:"publicUrlBase"` // public access base URL (empty = use PublicURL() default)
-	MaxFileSize   int64  `yaml:"maxFileSize"`   // max file size in bytes (0 = unlimited)
+	Driver         string `yaml:"driver"`         // local | qiniu | kodo | …
+	Root           string `yaml:"root"`           // local: 目录；qiniu: bucket 名
+	Region         string `yaml:"region"`         // 区域（七牛 huanan/z2 等）
+	Endpoint       string `yaml:"endpoint"`       // 自定义 endpoint
+	AccessKey      string `yaml:"accessKey"`      // AccessKey / SecretId
+	SecretKey      string `yaml:"secretKey"`      // SecretKey
+	PublicURLBase  string `yaml:"publicUrlBase"`  // 七牛绑定域名，如 https://soul.lingecho.com
+	Private        bool   `yaml:"private"`        // 七牛私有桶（默认签名 URL）
+	MaxFileSize    int64  `yaml:"maxFileSize"`    // max file size in bytes (0 = unlimited)
+	SignSecret     string `yaml:"signSecret"`     // HMAC secret for local signed media URLs (fallback: JWT secret)
+	DisplayURLTTL  string `yaml:"displayUrlTTL"`  // cover/list signed URL TTL (default 24h)
+	DownloadURLTTL string `yaml:"downloadUrlTTL"` // script download signed URL TTL (default 15m)
 }
 
 // CacheConfig holds cache configuration (ling-base/common/cache).
@@ -459,27 +463,44 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("APP_I18N_TRANSLATIONS_PATH"); v != "" {
 		cfg.I18n.TranslationsPath = v
 	}
-	// Storage
-	if v := os.Getenv("APP_STORAGE_DRIVER"); v != "" {
+	// Storage（兼容 APP_STORAGE_* 与 STORAGE_KIND / QINIU_*）
+	if v := firstEnv("APP_STORAGE_DRIVER", "STORAGE_KIND", "STORAGE_DRIVER"); v != "" {
 		cfg.Storage.Driver = v
 	}
-	if v := os.Getenv("APP_STORAGE_ROOT"); v != "" {
+	if v := firstEnv("APP_STORAGE_ROOT", "QINIU_BUCKET"); v != "" {
 		cfg.Storage.Root = v
 	}
-	if v := os.Getenv("APP_STORAGE_REGION"); v != "" {
+	if v := firstEnv("APP_STORAGE_REGION", "QINIU_REGION"); v != "" {
 		cfg.Storage.Region = v
 	}
 	if v := os.Getenv("APP_STORAGE_ENDPOINT"); v != "" {
 		cfg.Storage.Endpoint = v
 	}
-	if v := os.Getenv("APP_STORAGE_ACCESS_KEY"); v != "" {
+	if v := firstEnv("APP_STORAGE_ACCESS_KEY", "QINIU_ACCESS_KEY"); v != "" {
 		cfg.Storage.AccessKey = v
 	}
-	if v := os.Getenv("APP_STORAGE_SECRET_KEY"); v != "" {
+	if v := firstEnv("APP_STORAGE_SECRET_KEY", "QINIU_SECRET_KEY"); v != "" {
 		cfg.Storage.SecretKey = v
 	}
-	if v := os.Getenv("APP_STORAGE_PUBLIC_URL_BASE"); v != "" {
+	if v := firstEnv("APP_STORAGE_PUBLIC_URL_BASE", "QINIU_DOMAIN"); v != "" {
 		cfg.Storage.PublicURLBase = v
+	}
+	if v := firstEnv("APP_STORAGE_PRIVATE", "QINIU_PRIVATE"); v != "" {
+		cfg.Storage.Private = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("APP_STORAGE_MAX_FILE_SIZE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.Storage.MaxFileSize = n
+		}
+	}
+	if v := os.Getenv("APP_STORAGE_SIGN_SECRET"); v != "" {
+		cfg.Storage.SignSecret = v
+	}
+	if v := os.Getenv("APP_STORAGE_DISPLAY_URL_TTL"); v != "" {
+		cfg.Storage.DisplayURLTTL = v
+	}
+	if v := os.Getenv("APP_STORAGE_DOWNLOAD_URL_TTL"); v != "" {
+		cfg.Storage.DownloadURLTTL = v
 	}
 	// Cache
 	if v := os.Getenv("APP_CACHE_DRIVER"); v != "" {
@@ -511,6 +532,15 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("APP_FALLBACK_MESSAGE"); v != "" {
 		cfg.Fallback.DefaultMessage = v
 	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // LoadEnvFile loads KEY=VALUE pairs from a .env file into the process

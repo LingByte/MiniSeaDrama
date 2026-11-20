@@ -9,7 +9,7 @@ server:
 
 database:
   driver: sqlite          # mysql | postgres | sqlite
-  dsn: ""                 # empty = no database; SQLite example: data/app.db
+  dsn: data/app.db                 # empty = no database; SQLite example: data/app.db
   # dsn: root:password@tcp(127.0.0.1:3306)/miniseadrama?charset=utf8mb4&parseTime=True  # MySQL
   # dsn: host=localhost user=postgres password=secret dbname=miniseadrama port=5432 sslmode=disable  # PostgreSQL
   maxOpenConns: 25
@@ -39,9 +39,9 @@ rateLimit:
 # Circuit breaker (ling-base/common/circuitbreaker)
 circuitBreaker:
   enabled: false
-  failureThreshold: 5     # failure count threshold
-  minRequests: 10         # minimum requests before evaluation
-  recoveryTimeout: 30s    # recovery probe interval after tripping
+  failureThreshold: 50    # failure count threshold
+  minRequests: 100        # minimum requests before evaluation
+  recoveryTimeout: 2m     # recovery probe interval after tripping
 
 # API docs (ling-base/apidocs)
 docs:
@@ -83,7 +83,10 @@ storage:
   accessKey: ""            # cloud storage AccessKey
   secretKey: ""            # cloud storage SecretKey
   publicUrlBase: ""        # public access base URL (empty = use default)
-  maxFileSize: 10485760    # max file size in bytes (10 MB, 0 = unlimited)
+  maxFileSize: 52428800    # max file size in bytes (50 MB，封面+剧本 Word)
+  signSecret: ""           # 本地签名密钥（空则回退 JWT secret）
+  displayUrlTTL: 24h       # 封面展示用签名 URL 过期时间
+  downloadUrlTTL: 15m      # 剧本下载签名 URL 过期时间
 
 # Cache (ling-base/common/cache) — built-in module
 # Default: memory backend (in-process, zero external dependencies).

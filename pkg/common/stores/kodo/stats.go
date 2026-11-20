@@ -1,7 +1,10 @@
+//go:build qiniustats
+
 // Copyright (c) 2026 LingByte. All rights reserved.
 // SPDX-License-Identifier: MIT
 
 // kodo StorageStatsProvider implementation.
+// 默认构建不编入（依赖额外 stats SDK）；需要时：go build -tags qiniustats
 //
 // Bucket storage statistics use the Qiniu data statistics API
 // (/v6/space for storage size, /v6/count for object count) which is more

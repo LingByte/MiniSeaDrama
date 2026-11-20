@@ -4,71 +4,90 @@
 //
 // Usage:
 //
-//	// Initialize at startup in main.go
-//	pkgstorage.Init(cfg.Storage)
+//	pkgstorage.Init(...)
+//	pkgstorage.Write("covers/id/a.png", reader)
+//	url := pkgstorage.SignedURL("covers/id/a.png", ttl)
 //
-//	// Call directly from handler / service
-//	pkgstorage.Write("avatars/photo.jpg", reader)
-//	url := pkgstorage.PublicURL("avatars/photo.jpg")
-//
-// To switch to cloud storage (S3/OSS/COS/MinIO etc.):
-//  1. go get the corresponding driver module, e.g. go get github.com/LingByte/miniseadrama/pkg/common/stores/s3
-//  2. Add a case in Init() for the driver
-//  3. Set storage.driver in configs/config.yaml
+// Drivers: local（开发）| qiniu/kodo（生产七牛）
 package storage
 
 import (
+	"bytes"
 	"fmt"
 	"io"
-	"os"
+	"path"
+	"strings"
+	"time"
 
 	"github.com/LingByte/miniseadrama/pkg/common/stores"
+	"github.com/LingByte/miniseadrama/pkg/common/stores/kodo"
 	"github.com/LingByte/miniseadrama/pkg/common/stores/local"
 )
 
 // Package-level singleton.
 var (
-	// Store is the active object storage instance. nil until Init() is called.
-	Store stores.Store
-
-	// MaxFileSize is the maximum file size in bytes (0 = unlimited).
-	MaxFileSize int64
-
-	// PublicURLBase is the public access base URL (empty = use Store.PublicURL() default).
+	Store         stores.Store
+	MaxFileSize   int64
 	PublicURLBase string
+	DriverName    string
 )
 
+// InitOptions carries optional signing / TTL settings.
+type InitOptions struct {
+	SignSecret  []byte
+	DisplayTTL  time.Duration
+	DownloadTTL time.Duration
+	Private     bool // qiniu private bucket
+}
+
 // Init initializes the object storage singleton from configuration.
-// Default backend is local (local filesystem, zero cloud SDK dependency).
-// Switching drivers requires go get of the corresponding module and adding a case.
-func Init(driver, root, region, endpoint, accessKey, secretKey, publicURLBase string, maxFileSize int64) error {
-	switch driver {
+func Init(driver, root, region, endpoint, accessKey, secretKey, publicURLBase string, maxFileSize int64, opts ...InitOptions) error {
+	_ = endpoint
+	private := false
+	if len(opts) > 0 {
+		private = opts[0].Private
+	}
+	switch strings.ToLower(strings.TrimSpace(driver)) {
 	case "local", "":
+		DriverName = "local"
 		Store = local.New(local.Config{
 			Root:       root,
 			NewDirPerm: 0755,
 		})
-	// ── Additional backends require go get of the corresponding module ──
-	// case "s3":
-	//     Store = s3.New(s3.Config{Bucket: root, Region: region, AccessKey: accessKey, SecretKey: secretKey, Endpoint: endpoint})
-	// case "oss":
-	//     Store = oss.New(oss.Config{Bucket: root, Region: region, AccessKey: accessKey, SecretKey: secretKey})
-	// case "cos":
-	//     Store = cos.New(cos.Config{Bucket: root, Region: region, SecretID: accessKey, SecretKey: secretKey})
-	// case "minio":
-	//     Store = minio.New(minio.Config{Bucket: root, Endpoint: endpoint, AccessKey: accessKey, SecretKey: secretKey})
+	case "qiniu", "kodo":
+		DriverName = "qiniu"
+		if strings.TrimSpace(root) == "" || strings.TrimSpace(accessKey) == "" || strings.TrimSpace(secretKey) == "" {
+			return fmt.Errorf("qiniu 需要配置 bucket(APP_STORAGE_ROOT/QINIU_BUCKET)、AccessKey、SecretKey")
+		}
+		domain := strings.TrimSpace(publicURLBase)
+		if domain == "" {
+			return fmt.Errorf("qiniu 需要配置域名 APP_STORAGE_PUBLIC_URL_BASE / QINIU_DOMAIN")
+		}
+		Store = kodo.New(kodo.Config{
+			AccessKey:  accessKey,
+			SecretKey:  secretKey,
+			BucketName: root,
+			Domain:     domain,
+			Private:    private,
+			Region:     region,
+		})
 	default:
-		return fmt.Errorf("unsupported storage driver: %s (go get the corresponding module first)", driver)
+		return fmt.Errorf("unsupported storage driver: %s (supported: local, qiniu)", driver)
 	}
 
 	MaxFileSize = maxFileSize
 	PublicURLBase = publicURLBase
+	if len(opts) > 0 {
+		o := opts[0]
+		secret := o.SignSecret
+		if len(secret) == 0 && secretKey != "" {
+			secret = []byte(secretKey)
+		}
+		SetSigning(secret, o.DisplayTTL, o.DownloadTTL)
+	}
 	return nil
 }
 
-// Convenience methods — operate on the global Store
-
-// Write stores the content from reader to the given key.
 func Write(key string, r io.Reader) error {
 	if Store == nil {
 		return fmt.Errorf("storage not initialized, call Init() first")
@@ -76,7 +95,6 @@ func Write(key string, r io.Reader) error {
 	return Store.Write(key, r)
 }
 
-// Read returns a reader and size for the object at the given key.
 func Read(key string) (io.ReadCloser, int64, error) {
 	if Store == nil {
 		return nil, 0, fmt.Errorf("storage not initialized, call Init() first")
@@ -84,7 +102,6 @@ func Read(key string) (io.ReadCloser, int64, error) {
 	return Store.Read(key)
 }
 
-// Delete removes the object at the given key (no error if it does not exist).
 func Delete(key string) error {
 	if Store == nil {
 		return fmt.Errorf("storage not initialized, call Init() first")
@@ -92,7 +109,6 @@ func Delete(key string) error {
 	return Store.Delete(key)
 }
 
-// Exists checks whether the object at the given key exists.
 func Exists(key string) (bool, error) {
 	if Store == nil {
 		return false, fmt.Errorf("storage not initialized, call Init() first")
@@ -100,20 +116,20 @@ func Exists(key string) (bool, error) {
 	return Store.Exists(key)
 }
 
-// PublicURL returns the public access URL for the given key.
-// If PublicURLBase is set, it returns PublicURLBase/key; otherwise Store.PublicURL().
 func PublicURL(key string) string {
 	if Store == nil {
 		return ""
 	}
+	// 七牛私有桶走 SignedURL/PublicURL（带签）；不要再拼 PublicURLBase 覆盖签名
+	if DriverName == "qiniu" {
+		return Store.PublicURL(key)
+	}
 	if PublicURLBase != "" {
-		return PublicURLBase + "/" + key
+		return strings.TrimRight(PublicURLBase, "/") + "/" + strings.TrimLeft(key, "/")
 	}
 	return Store.PublicURL(key)
 }
 
-// CheckFileSize validates that the file size is within the allowed limit.
-// maxSize of 0 means unlimited.
 func CheckFileSize(size int64) error {
 	if MaxFileSize > 0 && size > MaxFileSize {
 		return fmt.Errorf("file size %d exceeds limit %d", size, MaxFileSize)
@@ -121,9 +137,21 @@ func CheckFileSize(size int64) error {
 	return nil
 }
 
-// Close releases resources (local backend needs no cleanup; kept for cloud backend compatibility).
+func PutBytes(key string, data []byte) error {
+	return Write(key, bytes.NewReader(data))
+}
+
+func ObjectKey(parts ...string) string {
+	clean := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.Trim(strings.ReplaceAll(p, "..", ""), "/")
+		if p != "" {
+			clean = append(clean, p)
+		}
+	}
+	return path.Join(clean...)
+}
+
 func Close() error {
-	// local backend needs no close; cloud backends with Close methods can be called here
-	_ = os.Stdout // avoid unused import warning (when no cloud backend is integrated)
 	return nil
 }
