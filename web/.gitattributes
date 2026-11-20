@@ -1,0 +1,146 @@
+# Git LFS Tracking Rules
+# Generated for binary, large, and non-diffable file types
+
+# ---------------------------------------------------------------------------
+# Images & Graphics
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.png                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.jpg                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.jpeg               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.gif                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.bmp                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.tiff               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.tif                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.ico                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.webp               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.psd                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.ai                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.sketch             filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Video
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.mp4                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.mov                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.avi                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.mkv                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.wmv                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.flv                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.webm               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.m4v                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.mpg                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.mpeg               filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Audio
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.mp3                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.wav                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.flac               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.aac                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.ogg                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.m4a                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.wma                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.aiff               filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# 3D & Game Assets
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.fbx                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.obj                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.blend              filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.dae                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.3ds                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.max                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.unity              filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.unitypackage       filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.uasset             filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.umap               filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Archives & Compressed Files
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.zip                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.tar                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.gz                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.bz2                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.7z                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.rar                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.tgz                filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Documents & Fonts
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.pdf                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.docx               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.xlsx               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.pptx               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.ttf                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.otf                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.woff               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.woff2              filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.eot                filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Data & Machine Learning
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.parquet            filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.hdf5               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.h5                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.pkl                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.pickle             filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.npy                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.npz                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.bin                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.pt                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.pth                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.onnx               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.pb                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.safetensors        filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.gguf               filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Databases
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.db                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.sqlite             filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.sqlite3            filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.mdb                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.accdb              filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Executables & Libraries
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.exe                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.dll                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.so                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.dylib              filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.a                  filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.lib                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.wasm               filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Build Artifacts & Packages
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.jar                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.war                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.ear                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.apk                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.ipa                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.deb                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.rpm                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.dmg                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.iso                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.img                filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# CAD & Scientific
+# ---------------------------------------------------------------------------
+# disabled (no git-lfs in this repo): *.dwg                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.dxf                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.step               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.stp                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.iges               filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.stl                filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.nc                 filter=lfs diff=lfs merge=lfs -text
+# disabled (no git-lfs in this repo): *.mat                filter=lfs diff=lfs merge=lfs -text
