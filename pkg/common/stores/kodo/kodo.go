@@ -114,8 +114,13 @@ var (
 	ipv4Client     *client.Client
 )
 
-func (s *Store) uploadToken() string {
-	p := storage.PutPolicy{Scope: s.cfg.BucketName, Expires: 3600}
+func (s *Store) uploadToken(key string) string {
+	// Scope 带 key 时可覆盖同名对象；不设 InsertOnly，允许替换封面
+	scope := s.cfg.BucketName
+	if key = strings.TrimPrefix(strings.TrimSpace(key), "/"); key != "" {
+		scope = s.cfg.BucketName + ":" + key
+	}
+	p := storage.PutPolicy{Scope: scope, Expires: 3600}
 	return p.UploadToken(s.mac())
 }
 
@@ -137,7 +142,7 @@ func (s *Store) Write(key string, r io.Reader) error {
 	uploader := storage.NewFormUploaderEx(&cfg, preferIPv4Client())
 	ret := storage.PutRet{}
 	extra := storage.PutExtra{}
-	return uploader.Put(context.Background(), &ret, s.uploadToken(), key, bytes.NewReader(data), int64(len(data)), &extra)
+	return uploader.Put(context.Background(), &ret, s.uploadToken(key), key, bytes.NewReader(data), int64(len(data)), &extra)
 }
 
 // Exists checks if a file exists in Kodo (code 612 = not found).
