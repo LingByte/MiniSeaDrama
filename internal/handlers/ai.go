@@ -445,7 +445,13 @@ func (h *Handlers) AIGenerateCover(c *gin.Context) {
 		respgin.WriteError(c, response.New(response.CodeInternal, "生图接口未返回图片"))
 		return
 	}
-	objectKey := pkgstorage.ObjectKey("covers", "ai", fmt.Sprintf("%d.png", time.Now().UnixNano()))
+	compressed, err := pkgstorage.CompressCover(bin)
+	if err != nil {
+		respgin.WriteError(c, response.New(response.CodeInternal, "封面压缩失败："+err.Error()))
+		return
+	}
+	bin = compressed
+	objectKey := pkgstorage.CoverObjectKey("covers", "ai", fmt.Sprintf("%d.jpg", time.Now().UnixNano()))
 	if err := pkgstorage.PutBytes(objectKey, bin); err != nil {
 		respgin.WriteError(c, response.New(response.CodeInternal, "封面写入对象存储失败："+err.Error()))
 		return

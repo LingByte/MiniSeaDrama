@@ -4,6 +4,7 @@ package handlers
 
 import (
 	"fmt"
+	"io"
 	"mime"
 	"path/filepath"
 	"strconv"
@@ -60,6 +61,36 @@ func (h *Handlers) UploadFile(c *gin.Context) {
 		return
 	}
 	defer src.Close()
+
+	// 封面目录：压缩为 JPEG 再入库
+	if strings.EqualFold(dir, "covers") || strings.HasPrefix(strings.ToLower(dir), "covers/") {
+		raw, readErr := io.ReadAll(src)
+		if readErr != nil {
+			respgin.WriteError(c, response.New(response.CodeInternal, "failed to read file: "+readErr.Error()))
+			return
+		}
+		compressed, cerr := pkgstorage.CompressCover(raw)
+		if cerr != nil {
+			respgin.WriteError(c, response.New(response.CodeBadRequest, "封面压缩失败："+cerr.Error()))
+			return
+		}
+		key = pkgstorage.CoverObjectKey(strings.TrimSuffix(key, filepath.Ext(key)) + ".jpg")
+		if err = pkgstorage.PutBytes(key, compressed); err != nil {
+			respgin.WriteError(c, response.New(response.CodeInternal, "storage write failed: "+err.Error()))
+			return
+		}
+		accessURL, _ := pkgstorage.SignedURL(key, pkgstorage.DisplayURLTTL)
+		if accessURL == "" {
+			accessURL = pkgstorage.PublicURL(key)
+		}
+		respgin.Created(c, types.FileUploadResponse{
+			Key:       key,
+			Name:      filepath.Base(key),
+			Size:      int64(len(compressed)),
+			PublicURL: accessURL,
+		})
+		return
+	}
 
 	// Write to storage
 	if err = pkgstorage.Write(key, src); err != nil {

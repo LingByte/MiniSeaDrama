@@ -70,6 +70,12 @@ func uploadDataURLCover(scriptID, dataURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("封面 base64 解码失败")
 	}
+	_ = ext // 统一压成 JPEG
+	compressed, err := pkgstorage.CompressCover(bin)
+	if err != nil {
+		return "", fmt.Errorf("封面压缩失败：%w", err)
+	}
+	bin = compressed
 	if err := pkgstorage.CheckFileSize(int64(len(bin))); err != nil {
 		return "", err
 	}
@@ -77,7 +83,7 @@ func uploadDataURLCover(scriptID, dataURL string) (string, error) {
 	if id == "" {
 		id = "cover"
 	}
-	key := pkgstorage.ObjectKey("covers", id, fmt.Sprintf("%d%s", time.Now().UnixNano(), ext))
+	key := pkgstorage.CoverObjectKey("covers", id, fmt.Sprintf("%d.jpg", time.Now().UnixNano()))
 	if err := pkgstorage.PutBytes(key, bin); err != nil {
 		return "", fmt.Errorf("封面写入对象存储失败：%w", err)
 	}
