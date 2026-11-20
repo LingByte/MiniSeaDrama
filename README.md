@@ -11,6 +11,15 @@ HTTP REST API 服务，基于 ling-base bootstrap 框架。
 ![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)
 
+## AI 剧本流水线
+
+本服务已内置 ShortFlix → ffmpeg → ASR → LLM 剧本生成流水线（Go），无需再启动独立 Python 服务。
+
+- 工作目录：`data/pipeline/`（可用 `PIPELINE_WORK_DIR` 覆盖）
+- 技能文档：`skills/haiman/至简海漫Skills_V1.4智能体版.md`
+- 依赖本机 `ffmpeg`；ASR 默认必剪接口；LLM/生图使用 `.env` 中的 `AI_*` 配置
+- 前端管理入口：登录管理员账号后访问 `/#/manage/ai`（与买家共用同一壳，无独立 `/#/admin`）
+
 ## 功能特性
 
 - HTTP REST API 路由 (Gin)

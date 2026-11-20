@@ -105,8 +105,10 @@ func ErrCodeFor(code Code) int {
 		return CodeNumInvalidParams
 	case CodeValidation:
 		return CodeNumValidationFailed
-	case CodeUnauthorized, CodeAuthFailed, CodeCredentialInvalid:
+	case CodeUnauthorized:
 		return CodeNumUnauthorized
+	case CodeAuthFailed, CodeCredentialInvalid:
+		return CodeNumInvalidCredentials
 	case CodeForbidden:
 		return CodeNumForbidden
 	case CodeTenantMismatch:

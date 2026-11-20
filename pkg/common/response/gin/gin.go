@@ -195,16 +195,16 @@ func buildEnvelope(c *gin.Context, ae *response.AppError, data any) any {
 
 // resolveMessage resolves the message for an AppError using
 // ContextResolver or the package-level Resolver.
+// Explicit Message (from New / FailWithCode) always wins over MsgKey i18n,
+// otherwise custom copy like「密码错误」会被 common.unauthorized 盖成「未授权」。
 func resolveMessage(c *gin.Context, ae *response.AppError) string {
-	if ae.MsgKey != "" {
-		if msg := resolveCtx(c, ae.MsgKey, ae.MsgArgs...); msg != "" && msg != ae.MsgKey {
-			return msg
-		}
-	}
 	if ae.Message != "" {
 		return ae.Message
 	}
 	if ae.MsgKey != "" {
+		if msg := resolveCtx(c, ae.MsgKey, ae.MsgArgs...); msg != "" && msg != ae.MsgKey {
+			return msg
+		}
 		return ae.MsgKey
 	}
 	return string(ae.Code)
@@ -248,9 +248,11 @@ func codeForI18nKey(key string) response.Code {
 	case "auth.needs_totp", "auth.invalid_totp", "auth.invalid_email_code",
 		"auth.invalid_device_code", "auth.invalid_voiceprint", "auth.invalid_sms_code",
 		"auth.needs_device_verify", "auth.needs_remote_verify", "auth.account_locked",
-		"auth.session_revoked", "account.password_wrong":
+		"auth.session_revoked", "account.password_wrong",
+		response.KeyAuthPasswordWrong, response.KeyAuthUserNotFound:
 		return response.CodeAuthFailed
 	case response.KeyForbidden, response.KeyPermInsufficient,
+		response.KeyAuthAccountDisabled,
 		"perm.insufficient_code", "perm.insufficient_credential",
 		"perm.need_tenant_user", "perm.need_tenant_context",
 		"perm.platform_no_tenant_rbac", "perm.invalid_credential":
@@ -259,7 +261,7 @@ func codeForI18nKey(key string) response.Code {
 		response.KeyAuthEmailNotRegistered, "auth.phone_not_registered":
 		return response.CodeNotFound
 	case response.KeyConflict, response.KeyDuplicate,
-		response.KeyTenantEmailExists, "account.totp_already_on":
+		response.KeyTenantEmailExists, response.KeyAuthEmailExists, "account.totp_already_on":
 		return response.CodeConflict
 	case response.KeyRateLimited, "auth.email_code_cooldown":
 		return response.CodeRateLimited

@@ -30,11 +30,16 @@ const (
 	KeyDuplicate          = "common.duplicate"
 
 	// auth.* — authentication
-	KeyAuthInvalidCredentials = "auth.invalid_credentials"
-	KeyAuthMissingToken       = "auth.missing_token"
-	KeyAuthInvalidToken       = "auth.invalid_token"
-	KeyAuthEmailNotRegistered = "auth.email_not_registered"
-	KeyAuthEmailSameAsCurrent = "auth.email_same_as_current"
+	KeyAuthInvalidCredentials     = "auth.invalid_credentials"
+	KeyAuthMissingToken           = "auth.missing_token"
+	KeyAuthInvalidToken           = "auth.invalid_token"
+	KeyAuthEmailNotRegistered     = "auth.email_not_registered"
+	KeyAuthEmailSameAsCurrent     = "auth.email_same_as_current"
+	KeyAuthUserNotFound           = "auth.user_not_found"
+	KeyAuthPasswordWrong          = "auth.password_wrong"
+	KeyAuthAccountDisabled        = "auth.account_disabled"
+	KeyAuthEmailOrUsernameRequired = "auth.email_or_username_required"
+	KeyAuthEmailExists            = "auth.email_exists"
 
 	// tenant.* — tenant/organization
 	KeyTenantRegisterDisabled = "tenant.register_disabled"
