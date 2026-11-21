@@ -136,37 +136,44 @@ class ShortFlix:
             h["Cookie"] = self.cookie
         return h
 
-    def get_text(self, url: str, timeout: int = 45) -> str:
-        req = urllib.request.Request(url, headers=self._headers("text/html,application/xhtml+xml"))
-        with _http_lock:
-            with self.opener.open(req, timeout=timeout) as resp:
-                if resp.status >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                return resp.read().decode("utf-8", errors="replace")
+    def _open(self, url: str, accept: str, timeout: int, retries: int = 4):
+        """带指数退避的 GET；应对 ShortFlix 偶发 timeout / connection refused。"""
+        last: Exception | None = None
+        for attempt in range(max(1, retries)):
+            req = urllib.request.Request(url, headers=self._headers(accept))
+            try:
+                with _http_lock:
+                    resp = self.opener.open(req, timeout=timeout)
+                    if resp.status >= 400:
+                        raise RuntimeError(f"HTTP {resp.status}")
+                    return resp
+            except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as e:
+                last = e
+                wait = min(30.0, 1.5 * (2**attempt))
+                print(f"  网络重试 {attempt + 1}/{retries} {e}  sleep {wait:.1f}s", flush=True)
+                time.sleep(wait)
+        assert last is not None
+        raise last
 
-    def get_json(self, url: str, timeout: int = 45) -> dict:
-        req = urllib.request.Request(url, headers=self._headers("application/json"))
-        with _http_lock:
-            with self.opener.open(req, timeout=timeout) as resp:
-                if resp.status >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                return json.loads(resp.read().decode("utf-8"))
+    def get_text(self, url: str, timeout: int = 60) -> str:
+        with self._open(url, "text/html,application/xhtml+xml", timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
 
-    def download_bytes(self, url: str, timeout: int = 60) -> bytes:
-        req = urllib.request.Request(url, headers=self._headers("*/*"))
-        with _http_lock:
-            with self.opener.open(req, timeout=timeout) as resp:
-                data = resp.read()
-                if resp.status >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                return data
+    def get_json(self, url: str, timeout: int = 60) -> dict:
+        with self._open(url, "application/json", timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def download_bytes(self, url: str, timeout: int = 90) -> bytes:
+        with self._open(url, "*/*", timeout) as resp:
+            data = resp.read()
+            return data
 
     def catalog_page(self, cursor: str = "", limit: int = 48) -> dict:
         q = {"limit": str(limit), "language": "zh_TW", "lang": "zh_TW"}
         if cursor:
             q["cursor"] = cursor
         url = "https://www.shortflix.net/api/search?" + urllib.parse.urlencode(q)
-        return self.get_json(url)
+        return self.get_json(url, timeout=90)
 
 
 def decode_next_payload(html: str) -> str:
@@ -623,7 +630,18 @@ def main() -> None:
 
     while True:
         print(f"拉取目录，offset={offset} limit={batch_size}…", flush=True)
-        catalog = collect_catalog(client, batch_size, offset=offset)
+        try:
+            catalog = collect_catalog(client, batch_size, offset=offset)
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as e:
+            if not args.until_end:
+                raise
+            print(f"目录拉取失败，60s 后重试同一 offset：{e}", flush=True)
+            time.sleep(60)
+            try:
+                client.sign_in()
+            except Exception as se:
+                print(f"重新登录失败：{se}", flush=True)
+            continue
         if not catalog:
             print(f"目录已空（offset={offset}），全部扫完。", flush=True)
             break
