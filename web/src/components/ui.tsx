@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentProps, type CSSProperties, type MouseEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 import { Badge as ShadcnBadge } from '@/components/ui/badge'
 import { Button as ShadcnButton } from '@/components/ui/button'
@@ -238,41 +240,76 @@ export function Toaster() {
   )
 }
 
-/** 剧本格式渲染：# 场景、角色：台词、【卡点】、其余为动作描写 */
+/** 剧本 / 试读正文：按 Markdown 渲染（标题、加粗、列表、分隔线等） */
 export function ScriptText({ text, size = 'md' }: { text: string; size?: 'md' | 'lg' }) {
-  const lines = text.split('\n').filter((l) => l.trim())
+  const source = (text || '')
+    // 旧版「【卡点】」行转成引用块，方便在 MD 里继续高亮
+    .replace(/^(【卡点】)(.*)$/gm, (_, _tag: string, rest: string) => `> **卡点** ${rest.trim()}`)
   const base = size === 'lg' ? 'text-[16px]' : 'text-sm'
   return (
-    <div className={cn('space-y-3 leading-[1.85]', base)}>
-      {lines.map((l, i) => {
-        const t = l.trim()
-        if (t.startsWith('#'))
-          return (
-            <p key={i} className="mt-2 border-l-2 border-primary bg-muted/60 py-1.5 pl-3 text-[13px] font-semibold tracking-wide text-foreground">
-              {t.replace(/^#+\s*/, '')}
-            </p>
-          )
-        if (t.startsWith('【卡点】'))
-          return (
-            <p key={i} className="rounded-xl border border-border bg-muted/50 px-4 py-3 text-foreground">
-              <span className="mr-2 rounded bg-foreground px-1.5 py-0.5 text-[11px] font-semibold text-background">卡点</span>
-              {t.replace('【卡点】', '')}
-            </p>
-          )
-        const m = t.match(/^([^：:（(]{1,18})[：:](.+)$/)
-        if (m)
-          return (
-            <p key={i} className="grid grid-cols-[minmax(64px,auto)_1fr] gap-3">
-              <span className="pt-px text-right font-semibold text-foreground">{m[1]}</span>
-              <span className="text-foreground/90">{m[2].trim()}</span>
-            </p>
-          )
-        return (
-          <p key={i} className="text-muted-foreground italic">
-            {t}
-          </p>
-        )
-      })}
+    <div className={cn('script-md leading-[1.85] text-foreground', base)}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => (
+            <h1 className="mt-1 mb-4 border-b border-border pb-2 text-xl font-semibold tracking-tight text-foreground first:mt-0">
+              {children}
+            </h1>
+          ),
+          h2: ({ children }) => (
+            <h2 className="mt-6 mb-3 border-l-2 border-primary bg-muted/50 py-1.5 pl-3 text-[15px] font-semibold tracking-wide text-foreground first:mt-0">
+              {children}
+            </h2>
+          ),
+          h3: ({ children }) => (
+            <h3 className="mt-5 mb-2 text-[14px] font-semibold text-foreground first:mt-0">{children}</h3>
+          ),
+          h4: ({ children }) => (
+            <h4 className="mt-4 mb-1.5 text-[13px] font-semibold text-foreground first:mt-0">{children}</h4>
+          ),
+          p: ({ children }) => <p className="my-2.5 text-foreground/90">{children}</p>,
+          strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
+          em: ({ children }) => <em className="italic text-muted-foreground">{children}</em>,
+          ul: ({ children }) => <ul className="my-3 list-disc space-y-1.5 pl-5 text-foreground/90">{children}</ul>,
+          ol: ({ children }) => <ol className="my-3 list-decimal space-y-1.5 pl-5 text-foreground/90">{children}</ol>,
+          li: ({ children }) => <li className="leading-relaxed marker:text-muted-foreground">{children}</li>,
+          hr: () => <hr className="my-5 border-border" />,
+          blockquote: ({ children }) => (
+            <blockquote className="my-3 rounded-xl border border-border bg-muted/50 px-4 py-3 text-foreground not-italic">
+              {children}
+            </blockquote>
+          ),
+          a: ({ href, children }) => (
+            <a href={href} className="font-medium text-primary underline-offset-2 hover:underline" target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          ),
+          code: ({ children, className }) => {
+            const block = Boolean(className)
+            if (block) {
+              return (
+                <code className="block overflow-x-auto rounded-lg border border-border bg-muted/60 p-3 text-[12px] leading-relaxed text-foreground">
+                  {children}
+                </code>
+              )
+            }
+            return (
+              <code className="rounded bg-muted px-1 py-0.5 text-[12px] font-medium text-foreground">{children}</code>
+            )
+          },
+          pre: ({ children }) => <pre className="my-3 overflow-x-auto">{children}</pre>,
+          table: ({ children }) => (
+            <div className="my-3 overflow-x-auto rounded-lg border border-border">
+              <table className="w-full min-w-[420px] border-collapse text-left text-[13px]">{children}</table>
+            </div>
+          ),
+          thead: ({ children }) => <thead className="bg-muted/60">{children}</thead>,
+          th: ({ children }) => <th className="border-b border-border px-3 py-2 font-semibold">{children}</th>,
+          td: ({ children }) => <td className="border-b border-border px-3 py-2 text-foreground/90">{children}</td>,
+        }}
+      >
+        {source}
+      </ReactMarkdown>
     </div>
   )
 }

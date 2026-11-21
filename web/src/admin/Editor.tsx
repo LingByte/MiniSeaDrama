@@ -4,6 +4,7 @@ import { Badge, Button, Field, QualityBadge, ScriptText, cn, download, inputCls 
 import { saveScriptFile } from '../lib/files'
 import { clearHandoff, markAiJobListed, peekHandoffFile, readHandoff } from '../lib/aiJobs'
 import { GRADE_SUGGEST_PRICE, LANGUAGES, PRICE_LABEL, SALE_LABEL, SALE_NOTE, SAMPLE_TXT, getVals, money, parseEpisodes, quote, setVals, suggestPrice, type SaleType, type Script } from '../lib/data'
+import { api } from '../lib/api'
 import { go, newId, useStore } from '../lib/store'
 import { Card, PageHeader } from './parts'
 
@@ -47,8 +48,35 @@ export function Editor({ id }: { id?: string }) {
   const [step, setStep] = useState(existing ? 1 : 0)
   const [showErr, setShowErr] = useState(false)
   const [file, setFile] = useState<File | null>(null)
+  const [loadingFull, setLoadingFull] = useState(Boolean(id))
   const aiJobId = useRef<string>('')
   const set = <K extends keyof Script>(k: K, v: Script[K]) => setF((x) => ({ ...x, [k]: v }))
+
+  // 列表接口已去掉分集正文：编辑时按需拉全文
+  useEffect(() => {
+    if (!id) {
+      setLoadingFull(false)
+      return
+    }
+    let alive = true
+    setLoadingFull(true)
+    void api<{ script: Script }>(`/admin/scripts/${encodeURIComponent(id)}`)
+      .then((r) => {
+        if (!alive || !r?.script) return
+        setF(structuredClone(r.script))
+        setStep(1)
+      })
+      .catch(() => {
+        if (!alive) return
+        if (!existing) toast('加载剧本失败', 'error')
+      })
+      .finally(() => {
+        if (alive) setLoadingFull(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // AI 页「填入上架表单」交接：Word + 封面 + 基本信息 + 标签 + 定价一次灌入
   useEffect(() => {
@@ -74,7 +102,8 @@ export function Editor({ id }: { id?: string }) {
     toast('已填入 AI 生成结果（文件 / 封面 / 信息 / 标签 / 定价），请核对后上架')
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (id && !existing) return <p className="text-muted-foreground">剧本不存在。</p>
+  if (id && !existing && !loadingFull) return <p className="text-muted-foreground">剧本不存在。</p>
+  if (id && loadingFull) return <p className="text-muted-foreground">正在加载剧本全文…</p>
 
   const errors: Record<number, string[]> = {
     0: [!f.fileName && '请上传剧本文件', !f.cover && '请上传封面图'].filter(Boolean) as string[],

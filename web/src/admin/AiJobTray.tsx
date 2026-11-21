@@ -4,8 +4,11 @@ import { Icon } from '../components/Icon'
 import {
   buildHandoffFromJob,
   buildHandoffFromWorkdir,
+  dismissAiJobs,
+  jobDisplayTitle,
   loadSavedAiJobs,
   markAiJobFilled,
+  mergeRemoteAiJobs,
   persistSavedAiJobs,
   removeSavedAiJob,
   subscribeAiJobs,
@@ -63,31 +66,37 @@ export function AiJobTray() {
   }, [state.scripts])
 
   useEffect(() => {
-    if (!tracked.length) {
-      setSynced(true)
-      return
-    }
     let alive = true
     const tick = async () => {
       try {
         const remote = await listJobs()
         if (!alive) return
         setMaxWorkers(remote.max_workers || 3)
+        // 用服务端全量补回本地被裁掉的任务，保证列表展示完整
+        const merged = mergeRemoteAiJobs(remote.items)
+        if (!alive) return
+        setTracked((prev) => {
+          if (
+            prev.length === merged.length &&
+            prev.every(
+              (p, i) =>
+                p.id === merged[i]?.id &&
+                p.title === merged[i]?.title &&
+                p.listing === merged[i]?.listing &&
+                p.url === merged[i]?.url,
+            )
+          ) {
+            return prev
+          }
+          return merged
+        })
+        // 只信 listJobs 一次返回；不在列表里的本地记录直接标 lost，
+        // 避免对几十上百个 id 逐个 GET /jobs/:id 打爆后端。
         const byId = Object.fromEntries(remote.items.map((j) => [j.id, j]))
-        const next: Record<string, GenJob | { status: 'lost' }> = {}
-        await Promise.all(
-          tracked.map(async (t) => {
-            if (byId[t.id]) {
-              next[t.id] = byId[t.id]
-              return
-            }
-            try {
-              next[t.id] = await getJob(t.id)
-            } catch {
-              next[t.id] = { status: 'lost' }
-            }
-          }),
-        )
+        const next: Record<string, GenJob | { status: 'lost' }> = { ...byId }
+        for (const t of merged) {
+          if (!next[t.id]) next[t.id] = { status: 'lost' }
+        }
         if (!alive) return
         setJobMap(next)
         setSynced(true)
@@ -95,7 +104,7 @@ export function AiJobTray() {
         if (!alive) return
         setJobMap((prev) => {
           const next = { ...prev }
-          for (const t of tracked) {
+          for (const t of loadSavedAiJobs()) {
             if (!next[t.id]) next[t.id] = { status: 'lost' }
           }
           return next
@@ -109,7 +118,7 @@ export function AiJobTray() {
       alive = false
       window.clearInterval(timer)
     }
-  }, [tracked])
+  }, [])
 
   // 详情面板打开时单独高频拉当前任务，进度更跟手
   useEffect(() => {
@@ -137,7 +146,23 @@ export function AiJobTray() {
     setTracked(loadSavedAiJobs())
   }
 
-  function removeOne(id: string) {
+  function isActiveStatus(st: string | undefined) {
+    return st === 'running' || st === 'queued'
+  }
+
+  /** 尽量取消服务端任务；已结束 / 丢失的忽略错误 */
+  async function cancelIfActive(id: string) {
+    const st = jobMap[id]?.status
+    if (!isActiveStatus(st)) return
+    try {
+      await cancelJob(id)
+    } catch {
+      /* 服务重启或已结束时忽略 */
+    }
+  }
+
+  async function removeOne(id: string) {
+    await cancelIfActive(id)
     removeSavedAiJob(id)
     setJobMap((prev) => {
       const copy = { ...prev }
@@ -148,12 +173,19 @@ export function AiJobTray() {
     refreshTracked()
   }
 
-  function clearAll() {
+  async function clearAll() {
+    const ids = tracked.map((t) => t.id)
+    const active = ids.filter((id) => isActiveStatus(jobMap[id]?.status))
+    if (active.length) {
+      toast(`正在取消 ${active.length} 个进行中的任务…`, 'info')
+      await Promise.all(active.map((id) => cancelIfActive(id)))
+    }
+    dismissAiJobs(ids)
     persistSavedAiJobs([])
     setJobMap({})
     setDetailId(null)
     refreshTracked()
-    toast('已清空任务列表')
+    toast(active.length ? `已取消 ${active.length} 个任务并清空列表` : '已清空任务列表')
   }
 
   async function fillListing(t: SavedAiJob) {
@@ -206,14 +238,14 @@ export function AiJobTray() {
           <div>
             <h3 className="text-sm font-semibold">后台生成任务</h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              并发上限 {maxWorkers} · 点击任务查看进度 · 完成后填入「上架新剧本」五步表单
+              共 {tracked.length} 个 · 并发上限 {maxWorkers} · 列表可滚动 · 点任务看进度
             </p>
           </div>
-          <Button size="sm" variant="ghost" onClick={clearAll}>
+          <Button size="sm" variant="ghost" onClick={() => void clearAll()}>
             清空列表
           </Button>
         </div>
-        <ul className="space-y-2">
+        <ul className="max-h-[min(640px,70vh)] space-y-2 overflow-y-auto overscroll-contain pr-1">
           {tracked.map((t) => {
             const j = jobMap[t.id]
             const st = !synced ? '…' : j?.status || 'lost'
@@ -246,7 +278,9 @@ export function AiJobTray() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate text-sm font-medium">{t.title || t.url}</p>
+                      <p className="truncate text-sm font-medium" title={t.url || t.title}>
+                        {jobDisplayTitle(t)}
+                      </p>
                       {listed && (
                         <span className="shrink-0 rounded-md bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
                           已上架
@@ -312,8 +346,7 @@ export function AiJobTray() {
                       variant="ghost"
                       className="text-muted-foreground"
                       onClick={() => {
-                        removeOne(t.id)
-                        toast('已移除')
+                        void removeOne(t.id).then(() => toast('已移除'))
                       }}
                     >
                       移除
@@ -328,7 +361,7 @@ export function AiJobTray() {
 
       <Modal open={!!detailId} onClose={() => setDetailId(null)} width="max-w-2xl">
         <ModalHeader
-          title={detailSaved?.title || '任务进度'}
+          title={detailSaved ? jobDisplayTitle(detailSaved) : '任务进度'}
           sub={detailSaved?.url}
           onClose={() => setDetailId(null)}
         />

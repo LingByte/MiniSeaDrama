@@ -167,6 +167,7 @@ func (h *Handlers) AIExistingArtifactFile(c *gin.Context) {
 func (h *Handlers) AICreateJob(c *gin.Context) {
 	var body struct {
 		URL    string `json:"url"`
+		Title  string `json:"title"`
 		Cookie string `json:"cookie"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.URL) == "" {
@@ -200,6 +201,10 @@ func (h *Handlers) AICreateJob(c *gin.Context) {
 	if err := pipeline.CheckFFmpeg(fmt.Sprint(params["ffmpeg"])); err != nil {
 		respgin.WriteError(c, response.New(response.CodeBadRequest, err.Error()))
 		return
+	}
+	// 提交时带上剧名，排队态列表也能显示标题（不必等 inspect）
+	if title := strings.TrimSpace(body.Title); title != "" {
+		params["series_title"] = title
 	}
 	_ = pipeline.EnsureDirs()
 	job := jobs.DefaultManager.Create(params)

@@ -92,6 +92,12 @@ export interface GenJob {
   progress?: GenProgress
   result?: GenResult | null
   error?: string | null
+  created_at?: number
+  params?: {
+    url?: string
+    series_title?: string
+    [key: string]: unknown
+  }
 }
 
 /** 工作目录里已存在的产物（任务未完成时也能读取） */
@@ -195,10 +201,10 @@ export async function inspectSeries(url: string): Promise<GenSeries> {
   }
 }
 
-export function startJob(url: string): Promise<GenJob> {
+export function startJob(url: string, opts?: { title?: string }): Promise<GenJob> {
   return json<GenJob>('/jobs', {
     method: 'POST',
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, title: opts?.title || undefined }),
   })
 }
 

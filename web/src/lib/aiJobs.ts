@@ -13,6 +13,7 @@ import {
 } from './generate'
 
 const JOBS_KEY = 'haiman-ai-jobs-v1'
+const DISMISSED_KEY = 'haiman-ai-jobs-dismissed-v1'
 const HANDOFF_KEY = 'haiman-ai-handoff-v1'
 const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
@@ -61,19 +62,178 @@ export function loadSavedAiJobs(): SavedAiJob[] {
 
 export function persistSavedAiJobs(list: SavedAiJob[]) {
   try {
-    localStorage.setItem(JOBS_KEY, JSON.stringify(list.slice(0, 30)))
+    localStorage.setItem(JOBS_KEY, JSON.stringify(list.slice(0, 100)))
   } catch {
     /* ignore */
   }
   emit()
 }
 
+const TITLE_BY_URL_KEY = 'haiman-ai-title-by-url-v1'
+
+function isHttpUrl(v: string) {
+  return /^https?:\/\//i.test(v.trim())
+}
+
+function loadTitleByUrl(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(TITLE_BY_URL_KEY)
+    if (!raw) return {}
+    const obj = JSON.parse(raw) as Record<string, string>
+    return obj && typeof obj === 'object' ? obj : {}
+  } catch {
+    return {}
+  }
+}
+
+function rememberTitleByUrl(url: string, title: string) {
+  const u = url.trim()
+  const t = title.trim()
+  if (!u || !t || isHttpUrl(t)) return
+  try {
+    const map = loadTitleByUrl()
+    if (map[u] === t) return
+    map[u] = t
+    const keys = Object.keys(map)
+    if (keys.length > 300) {
+      for (const k of keys.slice(0, keys.length - 300)) delete map[k]
+    }
+    localStorage.setItem(TITLE_BY_URL_KEY, JSON.stringify(map))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 列表展示用：优先真人剧名，避免直接甩整段 ShortFlix 链接 */
+export function jobDisplayTitle(job: { title?: string; url?: string; id?: string }) {
+  const title = (job.title || '').trim()
+  if (title && !isHttpUrl(title)) return title
+  const url = (job.url || (isHttpUrl(title) ? title : '') || '').trim()
+  if (url) {
+    const remembered = loadTitleByUrl()[url]
+    if (remembered) return remembered
+    const m = url.match(/\/videos\/([^/?#]+)/i)
+    if (m?.[1]) {
+      try {
+        return decodeURIComponent(m[1])
+      } catch {
+        return m[1]
+      }
+    }
+  }
+  return title || job.id || '未命名任务'
+}
+
+function loadDismissedIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DISMISSED_KEY)
+    if (!raw) return new Set()
+    const list = JSON.parse(raw) as string[]
+    return new Set(Array.isArray(list) ? list.filter(Boolean) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function persistDismissedIds(ids: Set<string>) {
+  try {
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify([...ids].slice(-200)))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 用户主动移除 / 清空后，避免轮询又从服务端灌回 */
+export function dismissAiJobs(ids: string[]) {
+  if (!ids.length) return
+  const set = loadDismissedIds()
+  for (const id of ids) if (id) set.add(id)
+  persistDismissedIds(set)
+}
+
+function undismissAiJob(id: string) {
+  const set = loadDismissedIds()
+  if (!set.delete(id)) return
+  persistDismissedIds(set)
+}
+
 export function upsertSavedAiJob(entry: SavedAiJob) {
+  if (entry.url && entry.title) rememberTitleByUrl(entry.url, entry.title)
+  undismissAiJob(entry.id)
   const prev = loadSavedAiJobs()
-  persistSavedAiJobs([entry, ...prev.filter((j) => j.id !== entry.id)].slice(0, 30))
+  persistSavedAiJobs([entry, ...prev.filter((j) => j.id !== entry.id)].slice(0, 100))
+}
+
+/** 把服务端任务列表并入本地跟踪（补回 localStorage 曾被裁掉的条目） */
+export function mergeRemoteAiJobs(
+  remote: Array<{
+    id: string
+    status?: string
+    created_at?: number
+    params?: { url?: string; series_title?: string; [k: string]: unknown }
+    result?: { series?: { title?: string } } | null
+  }>,
+): SavedAiJob[] {
+  const prev = loadSavedAiJobs()
+  const dismissed = loadDismissedIds()
+  const titleByUrl = loadTitleByUrl()
+  for (const j of prev) {
+    if (j.url && j.title && !isHttpUrl(j.title)) titleByUrl[j.url] = j.title
+  }
+  const byId = new Map(prev.map((j) => [j.id, { ...j }]))
+  let changed = false
+  for (const job of remote) {
+    if (!job?.id) continue
+    if (dismissed.has(job.id)) continue
+    const url = String(job.params?.url || '').trim()
+    let title = String(job.params?.series_title || job.result?.series?.title || '').trim()
+    if (isHttpUrl(title)) title = ''
+    if (!title && url && titleByUrl[url]) title = titleByUrl[url]
+    const startedAt = job.created_at ? Math.round(job.created_at * 1000) : Date.now()
+    const cur = byId.get(job.id)
+    if (!cur) {
+      // 只自动补回排队/运行中的，避免清空后又把历史任务灌回来
+      const st = String(job.status || '')
+      if (st !== 'running' && st !== 'queued') continue
+      byId.set(job.id, { id: job.id, url, title, startedAt })
+      changed = true
+      continue
+    }
+    if (title && title !== cur.title) {
+      cur.title = title
+      changed = true
+    } else if ((!cur.title || isHttpUrl(cur.title)) && titleByUrl[cur.url || url]) {
+      cur.title = titleByUrl[cur.url || url]
+      changed = true
+    }
+    if (url && !cur.url) {
+      cur.url = url
+      changed = true
+    }
+  }
+  // 服务端顺序（新→旧）优先，本地独有的跟在后面
+  const ordered: SavedAiJob[] = []
+  const seen = new Set<string>()
+  for (const job of remote) {
+    const row = byId.get(job.id)
+    if (!row || seen.has(job.id)) continue
+    ordered.push(row)
+    seen.add(job.id)
+  }
+  for (const row of prev) {
+    if (seen.has(row.id)) continue
+    ordered.push(byId.get(row.id) || row)
+    seen.add(row.id)
+  }
+  const next = ordered.slice(0, 100)
+  if (changed || next.length !== prev.length || next.some((j, i) => j.id !== prev[i]?.id)) {
+    persistSavedAiJobs(next)
+  }
+  return next
 }
 
 export function removeSavedAiJob(id: string) {
+  dismissAiJobs([id])
   persistSavedAiJobs(loadSavedAiJobs().filter((j) => j.id !== id))
   fileCache.delete(id)
 }

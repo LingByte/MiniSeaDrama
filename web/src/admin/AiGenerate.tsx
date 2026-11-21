@@ -105,6 +105,8 @@ export function AiGenerate({ onApply }: Props) {
   const [catalogCursor, setCatalogCursor] = useState('')
   const [catalogHasMore, setCatalogHasMore] = useState(false)
   const [catalogFilter, setCatalogFilter] = useState<'all' | 'loaded' | 'new' | 'hard_only' | 'soft_en'>('all')
+  const [catalogSelected, setCatalogSelected] = useState<string[]>([]) // slug 多选
+  const [batchStarting, setBatchStarting] = useState(false)
   const [subViewer, setSubViewer] = useState<{ episode: number; title: string; content: string; error?: string } | null>(null)
   const [subLoading, setSubLoading] = useState(false)
   const [retryingEp, setRetryingEp] = useState(0)
@@ -287,6 +289,18 @@ export function AiGenerate({ onApply }: Props) {
     void loadCatalog()
   }
 
+  function closeCatalog() {
+    setCatalogOpen(false)
+  }
+
+  function toggleCatalogSelect(slug: string) {
+    setCatalogSelected((prev) => (prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]))
+  }
+
+  function clearCatalogSelection() {
+    setCatalogSelected([])
+  }
+
   function onCatalogSearchChange(value: string) {
     setCatalogQ(value)
     if (catalogSearchTimer.current) window.clearTimeout(catalogSearchTimer.current)
@@ -303,9 +317,10 @@ export function AiGenerate({ onApply }: Props) {
     }
   }
 
-  async function pickFromCatalog(item: CatalogItem) {
-    if (busy || inspecting) return
-    setCatalogOpen(false)
+  /** 把一部剧填入表单并识别集数（不关抽屉时也可单独用） */
+  async function fillCatalogItem(item: CatalogItem, opts?: { close?: boolean }) {
+    if (busy || inspecting || batchStarting) return
+    if (opts?.close !== false) setCatalogOpen(false)
     setUrl(item.source_url)
     setSeries(null)
     setExisting(null)
@@ -318,6 +333,60 @@ export function AiGenerate({ onApply }: Props) {
       toast(e instanceof Error ? e.message : '识别失败', 'error')
     } finally {
       setInspecting(false)
+    }
+  }
+
+  async function handleBatchStartFromCatalog() {
+    if (batchStarting || busy) return
+    const picked = catalogSelected
+      .map((slug) => catalog.find((item) => item.slug === slug))
+      .filter((item): item is CatalogItem => Boolean(item))
+    if (!picked.length) return toast('请先勾选要生成的剧', 'error')
+    if (picked.length > 100) return toast('一次最多提交 100 部，请分批', 'error')
+    const hardN = picked.filter((item) => item.subtitle_status === 'hard_only').length
+    if (hardN > 0) {
+      toast(`${hardN} 部无英文字幕轨，将走视频+ASR，耗时更长`, 'info')
+    }
+    setBatchStarting(true)
+    let okN = 0
+    let failN = 0
+    let first: GenJob | null = null
+    const now = Date.now()
+    try {
+      for (const item of picked) {
+        try {
+          const created = await startJob(item.source_url, { title: item.title })
+          upsertSavedAiJob({
+            id: created.id,
+            url: item.source_url,
+            title: item.title,
+            startedAt: now,
+          })
+          okN++
+          if (!first) first = created
+        } catch {
+          failN++
+        }
+      }
+      if (first) {
+        applied.current = false
+        setJob(first)
+        startedAt.current = now
+        setElapsed(0)
+        stopTicker()
+        ticker.current = window.setInterval(() => setElapsed(Date.now() - startedAt.current), 1000)
+      }
+      setCatalogSelected([])
+      setCatalogOpen(false)
+      if (okN && !failN) {
+        toast(`已提交 ${okN} 部到后台队列（并发最多 ${maxWorkers}）`, 'success')
+      } else if (okN) {
+        toast(`已提交 ${okN} 部，失败 ${failN} 部`, 'info')
+      } else {
+        toast(`全部提交失败（${failN}）`, 'error')
+      }
+    } finally {
+      setBatchStarting(false)
     }
   }
 
@@ -353,7 +422,7 @@ export function AiGenerate({ onApply }: Props) {
     stopTicker()
     ticker.current = window.setInterval(() => setElapsed(Date.now() - startedAt.current), 1000)
     try {
-      const created = await startJob(url.trim())
+      const created = await startJob(url.trim(), { title: series.title })
       upsertSavedAiJob({
         id: created.id,
         url: url.trim(),
@@ -479,6 +548,19 @@ export function AiGenerate({ onApply }: Props) {
     if (catalogFilter === 'soft_en' && item.subtitle_status !== 'soft_en') return false
     return true
   })
+  const catalogSelectedItems = catalogSelected
+    .map((slug) => catalog.find((item) => item.slug === slug))
+    .filter((item): item is CatalogItem => Boolean(item))
+  const catalogViewSelectedCount = catalogView.filter((item) => catalogSelected.includes(item.slug)).length
+
+  function selectAllCatalogView() {
+    setCatalogSelected((prev) => {
+      const next = new Set(prev)
+      for (const item of catalogView) next.add(item.slug)
+      return [...next]
+    })
+  }
+
   const jobRunning = Boolean(job && (status === 'running' || status === 'queued'))
 
   async function openEpisodeSub(ep: EpisodeSubStatus) {
@@ -918,15 +1000,15 @@ export function AiGenerate({ onApply }: Props) {
 
       {!job && !series && (
         <p className="text-xs text-muted-foreground">
-          提示：点击「识别集数」核对集数后再生成；也可点「浏览短剧库」从抽屉里选剧。
+          提示：点「浏览短剧库」可多选批量生成；或填链接后点「识别集数」再单部生成。
         </p>
       )}
 
-      <Modal open={catalogOpen} onClose={() => setCatalogOpen(false)} side>
+      <Modal open={catalogOpen} onClose={closeCatalog} side>
         <ModalHeader
           title="浏览短剧库"
-          sub={`已加载 ${catalog.length} 部 · 下滑加载更多`}
-          onClose={() => setCatalogOpen(false)}
+          sub={`已加载 ${catalog.length} 部 · 勾选后可批量生成`}
+          onClose={closeCatalog}
         />
         <div className="flex h-[calc(100%-57px)] flex-col">
           <div className="space-y-3 border-b border-border p-4">
@@ -973,6 +1055,30 @@ export function AiGenerate({ onApply }: Props) {
                 </button>
               ))}
             </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+              <button
+                type="button"
+                className="rounded-md px-2 py-1 font-medium transition hover:bg-muted hover:text-foreground disabled:opacity-40"
+                disabled={!catalogView.length}
+                onClick={selectAllCatalogView}
+              >
+                全选当前列表
+              </button>
+              <button
+                type="button"
+                className="rounded-md px-2 py-1 font-medium transition hover:bg-muted hover:text-foreground disabled:opacity-40"
+                disabled={!catalogSelected.length}
+                onClick={clearCatalogSelection}
+              >
+                清空勾选
+              </button>
+              <span className="ml-auto">
+                已选 {catalogSelectedItems.length}
+                {catalogViewSelectedCount !== catalogSelectedItems.length
+                  ? `（本页 ${catalogViewSelectedCount}）`
+                  : ''}
+              </span>
+            </div>
           </div>
           <div
             ref={catalogListRef}
@@ -986,51 +1092,80 @@ export function AiGenerate({ onApply }: Props) {
               <p className="py-10 text-center text-xs text-muted-foreground">暂无剧目，可换关键词或点刷新</p>
             )}
             {catalogView.map((item) => {
-              const active = url.includes(item.slug)
+              const selected = catalogSelected.includes(item.slug)
+              const inForm = url.includes(item.slug)
               return (
-                <button
+                <div
                   key={item.slug}
-                  type="button"
-                  disabled={busy || inspecting}
-                  onClick={() => pickFromCatalog(item)}
                   className={cn(
-                    'flex w-full gap-3 rounded-xl border p-2.5 text-left transition hover:bg-muted/60 disabled:opacity-60',
-                    active ? 'border-primary bg-muted/40' : 'border-border bg-background',
+                    'flex w-full gap-2.5 rounded-xl border p-2.5 transition',
+                    selected ? 'border-primary bg-muted/40' : inForm ? 'border-primary/40 bg-muted/20' : 'border-border bg-background',
                   )}
                 >
-                  {item.cover ? (
-                    <img
-                      src={item.cover}
-                      alt=""
-                      className="h-[72px] w-[54px] shrink-0 rounded-lg object-cover bg-muted"
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <span className="grid h-[72px] w-[54px] shrink-0 place-items-center rounded-lg bg-muted text-[10px] text-muted-foreground">
-                      无封面
-                    </span>
-                  )}
-                  <span className="min-w-0 flex-1">
-                    <span className="line-clamp-2 text-sm font-medium leading-snug text-foreground">{item.title}</span>
-                    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                      <span
-                        className={cn(
-                          'rounded px-1.5 py-0.5 text-[10px] font-medium',
-                          item.loaded ? 'bg-emerald-50 text-emerald-700' : 'bg-muted text-muted-foreground',
-                        )}
-                      >
-                        {item.loaded ? '已载入' : '未载入'}
+                  <button
+                    type="button"
+                    aria-pressed={selected}
+                    aria-label={selected ? `取消选择 ${item.title}` : `选择 ${item.title}`}
+                    disabled={batchStarting}
+                    onClick={() => toggleCatalogSelect(item.slug)}
+                    className={cn(
+                      'mt-1 grid h-5 w-5 shrink-0 place-items-center rounded border transition',
+                      selected
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-border bg-background text-transparent hover:border-primary/60',
+                    )}
+                  >
+                    <Icon name="check" size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || inspecting || batchStarting}
+                    onClick={() => toggleCatalogSelect(item.slug)}
+                    className="flex min-w-0 flex-1 gap-3 text-left disabled:opacity-60"
+                  >
+                    {item.cover ? (
+                      <img
+                        src={item.cover}
+                        alt=""
+                        className="h-[72px] w-[54px] shrink-0 rounded-lg object-cover bg-muted"
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <span className="grid h-[72px] w-[54px] shrink-0 place-items-center rounded-lg bg-muted text-[10px] text-muted-foreground">
+                        无封面
                       </span>
-                      <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', subtitleBadge(item.subtitle_status).cls)}>
-                        {subtitleBadge(item.subtitle_status).label}
+                    )}
+                    <span className="min-w-0 flex-1">
+                      <span className="line-clamp-2 text-sm font-medium leading-snug text-foreground">{item.title}</span>
+                      <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={cn(
+                            'rounded px-1.5 py-0.5 text-[10px] font-medium',
+                            item.loaded ? 'bg-emerald-50 text-emerald-700' : 'bg-muted text-muted-foreground',
+                          )}
+                        >
+                          {item.loaded ? '已载入' : '未载入'}
+                        </span>
+                        <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', subtitleBadge(item.subtitle_status).cls)}>
+                          {subtitleBadge(item.subtitle_status).label}
+                        </span>
+                        {item.view_count ? (
+                          <span className="text-[10px] text-muted-foreground">{item.view_count} 次观看</span>
+                        ) : null}
                       </span>
-                      {item.view_count ? (
-                        <span className="text-[10px] text-muted-foreground">{item.view_count} 次观看</span>
-                      ) : null}
                     </span>
-                  </span>
-                </button>
+                  </button>
+                  <button
+                    type="button"
+                    title="填入表单并识别集数"
+                    disabled={busy || inspecting || batchStarting}
+                    onClick={() => void fillCatalogItem(item)}
+                    className="mt-0.5 shrink-0 self-start rounded-md px-2 py-1 text-[10px] font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-40"
+                  >
+                    填入
+                  </button>
+                </div>
               )
             })}
             {catalog.length > 0 && catalogView.length === 0 && (
@@ -1050,6 +1185,35 @@ export function AiGenerate({ onApply }: Props) {
             {!catalogHasMore && catalog.length > 0 && (
               <p className="py-3 text-center text-[11px] text-muted-foreground">已加载全部可浏览结果</p>
             )}
+          </div>
+          <div className="shrink-0 border-t border-border bg-card p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                className="min-w-0 flex-1"
+                disabled={!catalogSelectedItems.length || batchStarting || busy}
+                onClick={() => void handleBatchStartFromCatalog()}
+              >
+                <Icon name={batchStarting ? 'refresh' : 'sparkle'} size={15} className={cn('mr-1.5', batchStarting && 'animate-spin')} />
+                {batchStarting
+                  ? '提交中…'
+                  : catalogSelectedItems.length
+                    ? `批量生成 ${catalogSelectedItems.length} 部`
+                    : '批量生成'}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={catalogSelectedItems.length !== 1 || inspecting || batchStarting || busy}
+                onClick={() => {
+                  const only = catalogSelectedItems[0]
+                  if (only) void fillCatalogItem(only)
+                }}
+              >
+                填入核对
+              </Button>
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              勾选多部后点批量生成，会全部丢进后台队列（同时最多跑 {maxWorkers} 个）。单部可点右侧「填入」先核对集数。
+            </p>
           </div>
         </div>
       </Modal>
