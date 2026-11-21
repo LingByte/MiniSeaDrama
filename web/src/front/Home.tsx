@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from '../components/Icon'
 import { Empty, QualityBadge, cn, idx } from '../components/ui'
-import { PRICE_LABEL, SALE_LABEL, getVals, isBuyoutSold, money, qualityGrade, type SaleType, type Script } from '../lib/data'
+import { PRICE_LABEL, SALE_LABEL, money, qualityGrade, type SaleType, type Script } from '../lib/data'
+import { api } from '../lib/api'
 import { go, useStore } from '../lib/store'
+
+const PAGE_SIZE = 15
 
 const QUALITY_CHIP: Record<string, { on: string; off: string }> = {
   all: { on: 'bg-primary text-primary-foreground', off: 'bg-card text-muted-foreground border border-border hover:text-foreground' },
@@ -27,8 +30,14 @@ const SORTS = [
   ['priceDesc', '价格从高到低'],
 ] as const
 
-function scriptSearchBlob(s: Script) {
-  return [s.title, s.enTitle, s.logline, s.synopsis, s.quality, s.language, ...s.tags, ...s.markets].join(' ').toLowerCase()
+type CatalogPage = {
+  scripts: Script[]
+  nextCursor: string
+  total: number
+  onSaleTotal: number
+  plotCounts: Record<string, number>
+  featured: Script[]
+  newCount: number
 }
 
 export function Home() {
@@ -37,48 +46,87 @@ export function Home() {
   const [market, setMarket] = useState('全部市场')
   const [sort, setSort] = useState<(typeof SORTS)[number][0]>('hot')
   const [q, setQ] = useState('')
+  const [qDraft, setQDraft] = useState('')
   const [quality, setQuality] = useState('全部品质')
   const [tagSel, setTagSel] = useState('全部标签')
   const [plotOpen, setPlotOpen] = useState(false)
   const [saleF, setSaleF] = useState<'全部' | SaleType>('全部')
   const libRef = useRef<HTMLDivElement>(null)
 
-  const onSale = state.scripts.filter((s) => s.status === 'on')
-  const soldIds = new Set(state.scripts.filter((s) => isBuyoutSold(s)).map((s) => s.id))
+  const [list, setList] = useState<Script[]>([])
+  const [nextCursor, setNextCursor] = useState('')
+  const [total, setTotal] = useState(0)
+  const [onSaleTotal, setOnSaleTotal] = useState(0)
+  const [plotCounts, setPlotCounts] = useState<Record<string, number>>({})
+  const [featured, setFeatured] = useState<Script[]>([])
+  const [newCount, setNewCount] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [loadErr, setLoadErr] = useState('')
+  const reqSeq = useRef(0)
+
   const groupTags = (id: string) => state.tagGroups.find((g) => g.id === id)?.tags ?? []
-  const plotCount = new Map<string, number>()
-  onSale.forEach((s) => s.tags.forEach((t) => plotCount.set(t, (plotCount.get(t) ?? 0) + 1)))
-  // 展示标签库全部情节标签（含 0 部在售）
-  const plotTags = [...groupTags('plot')].sort((a, b) => (plotCount.get(b) ?? 0) - (plotCount.get(a) ?? 0))
+  const plotTags = [...groupTags('plot')].sort((a, b) => (plotCounts[b] ?? 0) - (plotCounts[a] ?? 0))
   const marketTags = groupTags('market')
   const qualityTags = groupTags('quality')
   const otherTags = state.tagGroups.filter((g) => !['plot', 'quality', 'market'].includes(g.id)).flatMap((g) => g.tags.map((t) => ({ key: `${g.id}::${t}`, label: `${g.name} · ${t}` })))
-  const featured = [...onSale].sort((a, b) => b.sales - a.sales).slice(0, 4)
-  const newCount = onSale.filter((s) => Date.now() - +new Date(s.createdAt) < 30 * 864e5).length
+  const soldIds = new Set(list.filter((s) => s.buyoutSold).map((s) => s.id))
 
-  const list = useMemo(() => {
-    const kw = q.trim().toLowerCase()
-    const r = onSale.filter(
-      (s) =>
-        (plot === '全部' || s.tags.includes(plot)) &&
-        (market === '全部市场' || s.markets.includes(market)) &&
-        (quality === '全部品质' || s.quality === quality) &&
-        (saleF === '全部' || s.saleType === saleF) &&
-        (tagSel === '全部标签' || getVals(s, tagSel.split('::')[0]).includes(tagSel.split('::')[1])) &&
-        (!kw || scriptSearchBlob(s).includes(kw)),
-    )
-    const price = (s: (typeof r)[number]) => s.price
-    const by: Record<string, (a: (typeof r)[number], b: (typeof r)[number]) => number> = {
-      hot: (a, b) => b.sales * b.rating - a.sales * a.rating,
-      new: (a, b) => b.createdAt.localeCompare(a.createdAt),
-      sales: (a, b) => b.sales - a.sales,
-      priceAsc: (a, b) => price(a) - price(b),
-      priceDesc: (a, b) => price(b) - price(a),
-    }
-    return r.sort(by[sort])
-  }, [onSale, plot, market, quality, saleF, tagSel, sort, q])
+  const fetchPage = useCallback(
+    async (cursor: string | undefined, append: boolean) => {
+      const my = ++reqSeq.current
+      const qs = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        sort,
+      })
+      if (q.trim()) qs.set('q', q.trim())
+      if (plot !== '全部') qs.set('plot', plot)
+      if (market !== '全部市场') qs.set('market', market)
+      if (quality !== '全部品质') qs.set('quality', quality)
+      if (saleF !== '全部') qs.set('saleType', saleF)
+      if (tagSel !== '全部标签') qs.set('tag', tagSel)
+      if (cursor) qs.set('cursor', cursor)
+
+      if (append) setLoadingMore(true)
+      else setLoading(true)
+      setLoadErr('')
+      try {
+        const r = await api<CatalogPage>(`/scripts?${qs.toString()}`)
+        if (my !== reqSeq.current) return
+        setList((prev) => (append ? [...prev, ...(r.scripts ?? [])] : (r.scripts ?? [])))
+        setNextCursor(r.nextCursor || '')
+        setTotal(r.total ?? 0)
+        setOnSaleTotal(r.onSaleTotal ?? 0)
+        setPlotCounts(r.plotCounts ?? {})
+        if (!append && r.featured?.length) setFeatured(r.featured)
+        if (typeof r.newCount === 'number') setNewCount(r.newCount)
+      } catch (e) {
+        if (my !== reqSeq.current) return
+        setLoadErr(e instanceof Error ? e.message : '加载失败')
+        if (!append) {
+          setList([])
+          setNextCursor('')
+          setTotal(0)
+        }
+      } finally {
+        if (my === reqSeq.current) {
+          setLoading(false)
+          setLoadingMore(false)
+        }
+      }
+    },
+    [plot, market, quality, saleF, tagSel, sort, q],
+  )
+
+  useEffect(() => {
+    void fetchPage(undefined, false)
+  }, [fetchPage])
 
   const scrollLib = () => libRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const submitSearch = () => {
+    setQ(qDraft)
+    scrollLib()
+  }
 
   return (
     <>
@@ -105,19 +153,27 @@ export function Home() {
             <form
               onSubmit={(e) => {
                 e.preventDefault()
-                scrollLib()
+                submitSearch()
               }}
               className="mt-7 flex max-w-md items-center gap-2 rounded-xl border border-border bg-card/90 p-1 shadow-sm backdrop-blur"
             >
               <Icon name="search" className="ml-3 text-muted-foreground" />
               <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
+                value={qDraft}
+                onChange={(e) => setQDraft(e.target.value)}
                 placeholder="搜索剧名、题材或关键词"
                 className="h-10 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
               />
-              {q && (
-                <button type="button" onClick={() => setQ('')} className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition active:scale-90 hover:bg-muted" aria-label="清除">
+              {qDraft && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQDraft('')
+                    setQ('')
+                  }}
+                  className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition active:scale-90 hover:bg-muted"
+                  aria-label="清除"
+                >
                   <Icon name="x" size={14} />
                 </button>
               )}
@@ -134,7 +190,7 @@ export function Home() {
               >
                 浏览书架
               </button>
-              <span className="text-xs text-muted-foreground">在售 {onSale.length} 部 · 前 3 集可试读</span>
+              <span className="text-xs text-muted-foreground">在售 {onSaleTotal} 部 · 前 3 集可试读</span>
             </div>
           </div>
 
@@ -177,12 +233,14 @@ export function Home() {
           <div>
             <h2 className="text-xl font-semibold tracking-tight">剧本书架</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              {q ? (
+              {loading && !list.length ? (
+                '加载中…'
+              ) : q ? (
                 <>
-                  「{q}」· 找到 {list.length} 部
+                  「{q}」· 找到 {total} 部
                 </>
               ) : (
-                <>共 {list.length} 部 · 点击封面试读</>
+                <>共 {total} 部 · 点击封面试读</>
               )}
             </p>
           </div>
@@ -203,9 +261,9 @@ export function Home() {
 
         <div className="mt-5 space-y-0 divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
           <FilterRow label="情节">
-            <PlotChip active={plot === '全部'} onClick={() => setPlot('全部')} label="全部" count={onSale.length} />
+            <PlotChip active={plot === '全部'} onClick={() => setPlot('全部')} label="全部" count={onSaleTotal} />
             {(plotOpen ? plotTags : plotTags.slice(0, 9)).map((t) => (
-              <PlotChip key={t} active={plot === t} onClick={() => setPlot(t)} label={t} count={plotCount.get(t) ?? 0} />
+              <PlotChip key={t} active={plot === t} onClick={() => setPlot(t)} label={t} count={plotCounts[t] ?? 0} />
             ))}
             {plotTags.length > 9 && (
               <button type="button" onClick={() => setPlotOpen(!plotOpen)} className="flex h-8 items-center gap-1 rounded-lg px-2.5 text-[13px] font-medium text-primary transition active:scale-95 hover:bg-muted">
@@ -214,7 +272,7 @@ export function Home() {
               </button>
             )}
             {q && (
-              <button type="button" onClick={() => setQ('')} className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-muted px-3 text-[13px] text-foreground transition active:scale-95">
+              <button type="button" onClick={() => { setQ(''); setQDraft('') }} className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-muted px-3 text-[13px] text-foreground transition active:scale-95">
                 搜索：{q} <Icon name="x" size={13} />
               </button>
             )}
@@ -244,8 +302,36 @@ export function Home() {
           </FilterRow>
         </div>
 
-        {list.length ? (
-          <Bookshelf soldIds={soldIds} key={saleF + plot + market + quality + tagSel + sort + q} list={list} />
+        {loadErr && !list.length ? (
+          <div className="mt-4 rounded-xl border border-border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
+            {loadErr}
+            <button type="button" className="ml-3 text-primary" onClick={() => void fetchPage(undefined, false)}>
+              重试
+            </button>
+          </div>
+        ) : list.length ? (
+          <>
+            <Bookshelf soldIds={soldIds} key={saleF + plot + market + quality + tagSel + sort + q} list={list} />
+            <div className="mt-8 flex justify-center">
+              {nextCursor ? (
+                <button
+                  type="button"
+                  disabled={loadingMore}
+                  onClick={() => void fetchPage(nextCursor, true)}
+                  className="h-10 rounded-xl border border-border bg-card px-6 text-sm font-medium text-foreground transition hover:bg-muted active:scale-[0.98] disabled:opacity-60"
+                >
+                  {loadingMore ? '加载中…' : `展示更多（已显示 ${list.length} / ${total}）`}
+                </button>
+              ) : (
+                !loading && total > 0 && <p className="text-xs text-muted-foreground">已全部展示 · 共 {total} 部</p>
+              )}
+            </div>
+          </>
+        ) : loading ? (
+          <div className="mt-10 grid place-items-center text-sm text-muted-foreground">
+            <div className="h-7 w-7 animate-spin rounded-full border-2 border-border border-t-primary" />
+            <p className="mt-3">正在加载书架…</p>
+          </div>
         ) : (
           <div className="mt-4">
             <Empty
@@ -263,6 +349,7 @@ export function Home() {
                     setSaleF('全部')
                     setTagSel('全部标签')
                     setQ('')
+                    setQDraft('')
                   }}
                 >
                   清除全部筛选

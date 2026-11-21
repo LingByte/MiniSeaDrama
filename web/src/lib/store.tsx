@@ -36,6 +36,8 @@ function useStoreValue() {
   const tid = useRef(0)
   const seq = useRef(0)
   const warned = useRef(false)
+  /** 前台 bootstrap 不再带剧本，不能再用 scripts.length===0 判断致命错误 */
+  const okOnce = useRef(false)
 
   const toast = useCallback((msg: string, tone: Toast['tone'] = 'success') => {
     const id = ++tid.current
@@ -45,7 +47,13 @@ function useStoreValue() {
 
   const isAdminNow = () => readUser()?.role === 'admin'
 
-  /** 游客视角：只取上架剧本 + 自己的订单，任何情况下都必须能读出来 */
+  /** 管理端路由才拉 /admin/all；首页 #/ 走轻量 bootstrap，书架分页另取 */
+  const onManagePath = () => {
+    const p = (typeof location !== 'undefined' ? location.hash.replace(/^#/, '') : '') || '/'
+    return p.startsWith('/manage')
+  }
+
+  /** 游客视角：壳层 + 自己的订单；上架剧本由首页 /scripts 分页拉取 */
   const loadGuest = useCallback(async (): Promise<State> => {
     let bs: { scripts: Script[]; tagGroups: TagGroup[] }
     try {
@@ -67,15 +75,15 @@ function useStoreValue() {
         /* 订单读不到不影响浏览 */
       }
     }
-    return { scripts: bs.scripts, orders, tagGroups: withDefaultGroups(bs.tagGroups) }
+    return { scripts: bs.scripts ?? [], orders, tagGroups: withDefaultGroups(bs.tagGroups) }
   }, [])
 
-  /** 从服务端拉取全量数据。管理员拿全部剧本（含草稿）+ 全部订单；买家只看自己的订单 */
+  /** 从服务端拉取数据。仅管理端路径拉全量剧本；前台不碰 admin/all */
   const refresh = useCallback(async () => {
     const my = ++seq.current
     try {
       let next: State
-      if (getToken() && isAdminNow()) {
+      if (getToken() && isAdminNow() && onManagePath()) {
         try {
           const r = await api<State>('/admin/all')
           next = { scripts: r.scripts, orders: r.orders, tagGroups: withDefaultGroups(r.tagGroups) }
@@ -90,6 +98,7 @@ function useStoreValue() {
       setState(next)
       setLoadError('')
       warned.current = false
+      okOnce.current = true
     } catch (e) {
       if (my !== seq.current) return
       const msg = isServerUnavailable(e) || !(e instanceof Error) ? SERVER_UNAVAILABLE : e.message
@@ -107,8 +116,13 @@ function useStoreValue() {
     refresh()
     // 仅登录态变化 / 跨标签页 storage 时刷新；不要 focus/visibility 狂刷 bootstrap
     const onAuth = () => refresh()
+    // 管理员进入 /manage 时再拉 admin/all
+    const onHash = () => {
+      if (getToken() && isAdminNow() && onManagePath()) refresh()
+    }
     window.addEventListener('haiman:auth', onAuth)
     window.addEventListener('storage', onAuth)
+    window.addEventListener('hashchange', onHash)
     // 前台数据同步放宽到 60s，避免 Network 面板被 bootstrap 刷屏
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') refresh()
@@ -116,6 +130,7 @@ function useStoreValue() {
     return () => {
       window.removeEventListener('haiman:auth', onAuth)
       window.removeEventListener('storage', onAuth)
+      window.removeEventListener('hashchange', onHash)
       clearInterval(timer)
     }
   }, [refresh])
@@ -225,7 +240,7 @@ function useStoreValue() {
     [refresh, toast],
   )
 
-  return { state, loaded, loadError, toasts, toast, ...actions }
+  return { state, loaded, loadError, readyOnce: okOnce.current, toasts, toast, ...actions }
 }
 
 type Store = ReturnType<typeof useStoreValue>
@@ -245,8 +260,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     )
   }
 
-  // 后端不可用时不显示任何假数据，直接给出明确错误与重试入口
-  if (value.loadError && value.state.scripts.length === 0) {
+  // 首次都连不上才整页报错；之后失败只顶栏提示（前台 scripts 常为空）
+  if (value.loadError && !value.readyOnce) {
     return (
       <div className="grid min-h-screen place-items-center bg-background px-6 text-foreground">
         <div className="w-full max-w-md rounded-2xl border border-border bg-white p-8 text-center shadow-sm">

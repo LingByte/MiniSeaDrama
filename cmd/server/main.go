@@ -292,6 +292,7 @@ func (c *httpServerComponent) Start(ctx context.Context) error {
 			"/api/v1/auth/login", "/api/v1/auth/refresh",
 			"/api/v1/register",
 			"/api/v1/bootstrap",
+			"/api/v1/scripts", // 书架分页 + 试读详情（游客可访问）
 			"/api/v1/media", // 封面等签名 URL，img 标签无法带 JWT
 			"/api/v1/pay/notify",
 			"/pay/return",

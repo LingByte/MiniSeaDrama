@@ -74,10 +74,13 @@ func (h *Handlers) registerRoutes(r *humax.Group) {
 // registerAdminRoutes registers admin script management + front-end bootstrap.
 func (h *Handlers) registerAdminRoutes(r *humax.Group) {
 	r.GET("/api/v1/bootstrap", h.Bootstrap)
+	r.GET("/api/v1/scripts", h.ListPublicScripts)
+	r.GET("/api/v1/scripts/:id", h.GetScript)
 
 	admin := r.Group("/api/v1/admin")
 	{
 		admin.GET("/all", h.AdminAll)
+		admin.GET("/scripts/:id", h.GetAdminScript)
 		admin.POST("/scripts", h.CreateAdminScript)
 		admin.PUT("/scripts/:id", h.UpsertAdminScript)
 		admin.PATCH("/scripts/:id", h.PatchAdminScript)

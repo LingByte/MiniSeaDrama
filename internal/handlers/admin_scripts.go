@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/LingByte/miniseadrama/internal/models"
-	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
+	"github.com/LingByte/miniseadrama/internal/scriptdata"
+	"github.com/LingByte/miniseadrama/pkg/common/jwtutil"
 	"github.com/LingByte/miniseadrama/pkg/common/response"
 	respgin "github.com/LingByte/miniseadrama/pkg/common/response/gin"
+	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -24,17 +26,124 @@ import (
 
 const scriptFileDir = "data/scripts" // 仅兼容旧本地路径
 
-// AdminAll 返回管理端所需的全部数据（剧本 + 订单 + 标签分类）。
+// slimEpisodeTexts 去掉分集正文，显著缩小列表接口体积（AI 剧本单部可达数百 KB）。
+// keepText 保留前 N 集 text（试读用）；其余集只留 title。
+func slimEpisodeTexts(script map[string]any, keepText int) {
+	if keepText < 0 {
+		keepText = 0
+	}
+	raw, ok := script["episodes"]
+	if !ok || raw == nil {
+		return
+	}
+	switch eps := raw.(type) {
+	case []any:
+		for i, item := range eps {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if i >= keepText {
+				m["text"] = ""
+			}
+		}
+	case []map[string]any:
+		for i := range eps {
+			if i >= keepText {
+				eps[i]["text"] = ""
+			}
+		}
+	}
+}
+
+// truncateEpisodes 试读响应只保留前 keep 集，避免把未购集标题/结构一并下发。
+func truncateEpisodes(script map[string]any, keep int) {
+	if keep < 0 {
+		keep = 0
+	}
+	raw, ok := script["episodes"]
+	if !ok || raw == nil {
+		return
+	}
+	switch eps := raw.(type) {
+	case []any:
+		if keep > len(eps) {
+			keep = len(eps)
+		}
+		script["episodes"] = eps[:keep]
+	case []map[string]any:
+		if keep > len(eps) {
+			keep = len(eps)
+		}
+		script["episodes"] = eps[:keep]
+	}
+}
+
+// ensureJWTClaims 公开路由跳过了鉴权中间件时，仍尝试解析 Bearer，供「已购解锁全文」使用。
+func (h *Handlers) ensureJWTClaims(c *gin.Context) {
+	if ClaimsFromContext(c) != nil || h.jwtAuth == nil {
+		return
+	}
+	token, err := jwtutil.ExtractBearer(c.GetHeader("Authorization"))
+	if err != nil || token == "" {
+		return
+	}
+	claims, err := h.jwtAuth.Verify(token)
+	if err != nil || claims == nil {
+		return
+	}
+	c.Set("jwt_claims", claims)
+	c.Set("user_id", claims.Subject)
+}
+
+func asInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		var i int
+		_, _ = fmt.Sscanf(n, "%d", &i)
+		return i
+	default:
+		return 0
+	}
+}
+
+// AdminAll 返回管理端列表数据（剧本元数据 + 订单 + 标签）。
+// 不分发分集正文——编辑页按 GET /admin/scripts/:id 再拉全文，避免 10MB+ 拖垮接口。
 func (h *Handlers) AdminAll(c *gin.Context) {
 	scripts := []map[string]any{}
 	if h.db != nil {
 		var rows []models.AdminScript
-		if err := h.db.WithContext(c.Request.Context()).Order("updated_at DESC").Find(&rows).Error; err != nil {
+		var err error
+		if h.db.Dialector.Name() == "mysql" {
+			err = h.db.WithContext(c.Request.Context()).Raw(`
+				SELECT script_id, file_name, file_size, file_path, created_at, updated_at,
+					JSON_SET(payload, '$.episodes', JSON_ARRAY()) AS payload
+				FROM admin_scripts
+				ORDER BY updated_at DESC`).Scan(&rows).Error
+		} else {
+			err = h.db.WithContext(c.Request.Context()).Order("updated_at DESC").Find(&rows).Error
+		}
+		if err != nil {
 			respgin.WriteError(c, response.Err(response.CodeInternal))
 			return
 		}
+		sold := h.buyoutSoldSet(c.Request.Context())
 		for i := range rows {
-			scripts = append(scripts, withResolvedCover(rows[i].ToScript()))
+			script := withResolvedCover(rows[i].ToScript())
+			slimEpisodeTexts(script, 0)
+			if sold[rows[i].ScriptID] {
+				script["buyoutSold"] = true
+			}
+			scripts = append(scripts, script)
 		}
 	}
 	respgin.Success(c, gin.H{
@@ -44,23 +153,89 @@ func (h *Handlers) AdminAll(c *gin.Context) {
 	})
 }
 
-// Bootstrap 返回前台浏览所需的已上架剧本与标签分类。
-func (h *Handlers) Bootstrap(c *gin.Context) {
-	scripts := []map[string]any{}
-	if h.db != nil {
-		var rows []models.AdminScript
-		if err := h.db.WithContext(c.Request.Context()).Order("updated_at DESC").Find(&rows).Error; err != nil {
-			respgin.WriteError(c, response.Err(response.CodeInternal))
+// invalidateCatalogCache 剧本变更后清掉书架缓存。
+func invalidateCatalogCache() {
+	catalogCache.mu.Lock()
+	catalogCache.snap = catalogSnapshot{}
+	catalogCache.mu.Unlock()
+}
+
+func (h *Handlers) loadAdminScriptRow(c *gin.Context, id string) (*models.AdminScript, error) {
+	if h.db == nil || id == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var row models.AdminScript
+	if err := h.db.WithContext(c.Request.Context()).First(&row, "script_id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (h *Handlers) userOwnsScript(email, scriptID string) bool {
+	if h.db == nil || email == "" || scriptID == "" {
+		return false
+	}
+	var n int64
+	_ = h.db.Model(&models.Order{}).
+		Where("account = ? AND script_id = ? AND status = ?", email, scriptID, "paid").
+		Limit(1).Count(&n).Error
+	return n > 0
+}
+
+// GetAdminScript 返回单部剧本全文（含分集正文），供编辑页按需加载。
+func (h *Handlers) GetAdminScript(c *gin.Context) {
+	row, err := h.loadAdminScriptRow(c, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			respgin.WriteError(c, response.Err(response.CodeNotFound))
 			return
 		}
-		for i := range rows {
-			script := withResolvedCover(rows[i].ToScript())
-			if strings.EqualFold(str(script["status"]), "on") {
-				scripts = append(scripts, script)
-			}
-		}
+		respgin.WriteError(c, response.Err(response.CodeInternal))
+		return
 	}
-	respgin.Success(c, gin.H{"scripts": scripts, "tagGroups": []any{}})
+	respgin.Success(c, gin.H{"script": withResolvedCover(row.ToScript())})
+}
+
+// GetScript 前台按需拉单部剧本：仅已购用户拿全文；游客/管理员前台浏览一律试读。
+// 管理员编辑请走 GET /admin/scripts/:id。
+func (h *Handlers) GetScript(c *gin.Context) {
+	row, err := h.loadAdminScriptRow(c, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			respgin.WriteError(c, response.Err(response.CodeNotFound))
+			return
+		}
+		respgin.WriteError(c, response.Err(response.CodeInternal))
+		return
+	}
+	script := withResolvedCover(row.ToScript())
+	if buyoutSold(h.db, row.ScriptID) {
+		script["buyoutSold"] = true
+	}
+	h.ensureJWTClaims(c)
+	email, _, _ := h.currentAccount(c)
+	full := h.userOwnsScript(email, row.ScriptID)
+	// 脏数据：整剧糊成 1 集时先按 Episode 标记拆开；标题按顺序重编号，避免「EP01=第4集」
+	_ = scriptdata.NormalizeEpisodes(script)
+	_ = scriptdata.RenumberScriptEpisodes(script)
+	if !full {
+		if !strings.EqualFold(str(script["status"]), "on") {
+			respgin.WriteError(c, response.Err(response.CodeNotFound))
+			return
+		}
+		keep := asInt(script["trialCount"])
+		if keep < 1 {
+			keep = 1
+		}
+		slimEpisodeTexts(script, keep)
+		truncateEpisodes(script, keep)
+	}
+	respgin.Success(c, gin.H{"script": script})
+}
+
+// Bootstrap 返回前台壳层数据（标签等）。书架剧本改走 GET /api/v1/scripts 分页，避免整库下发。
+func (h *Handlers) Bootstrap(c *gin.Context) {
+	respgin.Success(c, gin.H{"scripts": []any{}, "tagGroups": []any{}})
 }
 
 // CreateAdminScript 新建剧本。
@@ -126,6 +301,7 @@ func (h *Handlers) DeleteAdminScript(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
+	invalidateCatalogCache()
 	respgin.Success(c, gin.H{"ok": true})
 }
 
@@ -193,6 +369,8 @@ func (h *Handlers) DownloadScriptFile(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeNotFound))
 		return
 	}
+	// /api/v1/scripts 是公开前缀，中间件会跳过 JWT；这里补解析 Bearer，否则已登录也会「未授权」
+	h.ensureJWTClaims(c)
 	email, role, err := h.currentAccount(c)
 	if err != nil {
 		respgin.WriteError(c, response.Err(response.CodeUnauthorized))
@@ -290,6 +468,7 @@ func (h *Handlers) saveScript(c *gin.Context, id string, script map[string]any) 
 		}
 		row.Payload = string(payload)
 	}
+	invalidateCatalogCache()
 	return withResolvedCover(row.ToScript()), nil
 }
 

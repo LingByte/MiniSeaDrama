@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../components/Icon'
 import { Badge, Button, Empty, QualityBadge, ScriptText, cn } from '../components/ui'
-import { PRICE_LABEL, SALE_LABEL, SALE_NOTE, isBuyoutSold, money, quote } from '../lib/data'
+import { PRICE_LABEL, SALE_LABEL, SALE_NOTE, isBuyoutSold, money, quote, type Script } from '../lib/data'
+import { api } from '../lib/api'
 import { downloadScript } from '../lib/files'
 import { rememberNext, useAuth } from '../lib/auth'
 import { go, useStore } from '../lib/store'
@@ -11,11 +12,59 @@ import { ScriptCard } from './ScriptCard'
 export function Detail({ id }: { id: string }) {
   const { state, toast } = useStore()
   const { user } = useAuth()
-  const s = state.scripts.find((x) => x.id === id)
+  const [full, setFull] = useState<Script | null>(null)
+  const [fetchErr, setFetchErr] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [related, setRelated] = useState<Script[]>([])
+  const s = full
   const [ep, setEp] = useState(0)
   const [checkout, setCheckout] = useState(false)
   const [progress, setProgress] = useState(0)
   const readerRef = useRef<HTMLDivElement>(null)
+
+  // 书架已改为分页卡片（无正文），详情页始终按 id 拉试读/全文
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setFetchErr(false)
+    setFull(null)
+    setRelated([])
+    setEp(0)
+    void api<{ script: Script }>(`/scripts/${encodeURIComponent(id)}`)
+      .then((r) => {
+        if (!alive) return
+        if (r?.script) setFull(r.script)
+        else setFetchErr(true)
+      })
+      .catch(() => {
+        if (alive) setFetchErr(true)
+      })
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [id, user])
+
+  // 同题材推荐：按首个情节标签拉一页卡片，排除当前剧
+  const relatedPlot = s?.tags?.[0] ?? ''
+  useEffect(() => {
+    if (!s?.id || !relatedPlot) return
+    let alive = true
+    const qs = new URLSearchParams({ limit: '8', sort: 'hot', plot: relatedPlot })
+    void api<{ scripts: Script[] }>(`/scripts?${qs}`)
+      .then((r) => {
+        if (!alive) return
+        setRelated((r.scripts ?? []).filter((x) => x.id !== s.id).slice(0, 4))
+      })
+      .catch(() => {
+        /* 推荐失败不影响阅读 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [s?.id, relatedPlot])
 
   useEffect(() => {
     const el = readerRef.current
@@ -30,7 +79,17 @@ export function Detail({ id }: { id: string }) {
     return () => window.removeEventListener('scroll', f)
   }, [ep])
 
-  if (!s || s.status !== 'on')
+  if (loading)
+    return (
+      <div className="grid min-h-[40vh] place-items-center text-sm text-muted-foreground">
+        <div className="text-center">
+          <div className="mx-auto h-7 w-7 animate-spin rounded-full border-2 border-border border-t-primary" />
+          <p className="mt-3">正在加载剧本…</p>
+        </div>
+      </div>
+    )
+
+  if (fetchErr || !s || s.status !== 'on')
     return (
       <div className="mx-auto max-w-3xl py-24">
         <Empty icon="book" title="剧本不存在或已下架" action={<Button onClick={() => go('/')}>返回剧本库</Button>} />
@@ -49,9 +108,10 @@ export function Detail({ id }: { id: string }) {
     }
     setCheckout(true)
   }
-  const unlocked = owned ? s.episodes.length : s.trialCount
-  const related = state.scripts.filter((x) => x.status === 'on' && x.id !== s.id && x.tags.some((g) => s.tags.includes(g))).slice(0, 4)
-  const lockedPreview = Math.min(s.totalEpisodes - s.episodes.length, 5)
+  // 未购买：只信试读集数；接口也会截断 episodes，避免把后面集标题一起下发
+  const trialN = Math.max(1, Math.floor(Number(s.trialCount)) || 1)
+  const unlocked = owned ? s.episodes.length : Math.min(trialN, s.episodes.length || trialN)
+  const lockedPreview = Math.min(Math.max(0, (s.totalEpisodes || 0) - unlocked), 12)
 
   return (
     <div className="pt-2">
@@ -160,9 +220,7 @@ export function Detail({ id }: { id: string }) {
                 <div className="mb-5 flex items-center justify-between border-b border-dashed border-border pb-4">
                   <div>
                     <p className="text-xs font-semibold tracking-[0.16em] text-muted-foreground">EPISODE {ep + 1}</p>
-                    <h3 className="mt-1 text-base font-semibold">
-                      第 {ep + 1} 集 · {s.episodes[ep]?.title}
-                    </h3>
+                    <h3 className="mt-1 text-base font-semibold">{episodeHeading(ep, s.episodes[ep]?.title)}</h3>
                   </div>
                   <span className="text-xs text-muted-foreground">约 {Math.max(1, Math.round((s.episodes[ep]?.text.length ?? 0) / 120))} 分钟时长</span>
                 </div>
@@ -253,4 +311,12 @@ export function Detail({ id }: { id: string }) {
       <Checkout open={checkout} onClose={() => setCheckout(false)} script={s} />
     </div>
   )
+}
+
+/** 标题已是「第 N 集」时不再叠一层「第 i 集 ·」 */
+function episodeHeading(index: number, title?: string) {
+  const t = (title || '').trim()
+  if (!t) return `第 ${index + 1} 集`
+  if (/^第\s*\d+\s*集/.test(t)) return t
+  return `第 ${index + 1} 集 · ${t}`
 }
