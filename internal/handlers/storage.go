@@ -62,8 +62,9 @@ func (h *Handlers) UploadFile(c *gin.Context) {
 	}
 	defer src.Close()
 
-	// 封面目录：压缩为 JPEG 再入库
-	if strings.EqualFold(dir, "covers") || strings.HasPrefix(strings.ToLower(dir), "covers/") {
+	// 封面 / 头像：压缩为 JPEG 再入库
+	if strings.EqualFold(dir, "covers") || strings.HasPrefix(strings.ToLower(dir), "covers/") ||
+		strings.EqualFold(dir, "avatars") || strings.HasPrefix(strings.ToLower(dir), "avatars/") {
 		raw, readErr := io.ReadAll(src)
 		if readErr != nil {
 			respgin.WriteError(c, response.New(response.CodeInternal, "failed to read file: "+readErr.Error()))
@@ -71,7 +72,7 @@ func (h *Handlers) UploadFile(c *gin.Context) {
 		}
 		compressed, cerr := pkgstorage.CompressCover(raw)
 		if cerr != nil {
-			respgin.WriteError(c, response.New(response.CodeBadRequest, "封面压缩失败："+cerr.Error()))
+			respgin.WriteError(c, response.New(response.CodeBadRequest, "图片压缩失败："+cerr.Error()))
 			return
 		}
 		key = pkgstorage.CoverObjectKey(strings.TrimSuffix(key, filepath.Ext(key)) + ".jpg")

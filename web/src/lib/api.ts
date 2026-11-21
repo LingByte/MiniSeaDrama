@@ -119,10 +119,14 @@ export async function api<T>(path: string, opts: ApiOpts = {}): Promise<T> {
 
   // Go 后端业务错误也返回 HTTP 200，成功码是 200（部分老接口用 0），其余为业务错误码
   if (typeof env.code === 'number' && env.code !== 200 && env.code !== 0) {
-    if (getToken() && !isAuthPath(path) && (env.code === 401 || env.error === 'unauthorized')) {
+    const unauthorized =
+      env.code === 401 ||
+      env.code === 1002 ||
+      String(env.error || '').toUpperCase() === 'UNAUTHORIZED'
+    if (getToken() && !isAuthPath(path) && unauthorized) {
       dropStaleLogin()
     }
-    throw new ApiError(env.msg || env.message || env.error || '请求失败', res.status, env.error ?? '')
+    throw new ApiError(env.msg || env.message || env.error || '请求失败', unauthorized ? 401 : res.status, env.error ?? '')
   }
 
   if (payload && typeof payload === 'object' && 'data' in env) {

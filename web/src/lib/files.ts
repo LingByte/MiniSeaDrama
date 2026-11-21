@@ -1,11 +1,11 @@
 import type { Script } from './data'
 import { apiUrl, authHeaders } from './api'
 
-/** 上传封面到对象存储，返回 storage key（入库）与临时访问 URL（展示） */
-export async function uploadCoverFile(file: File): Promise<{ key: string; url: string }> {
+/** 上传图片到对象存储，返回 storage key（入库）与临时访问 URL（展示） */
+export async function uploadImageFile(file: File, dir: 'covers' | 'avatars' = 'covers'): Promise<{ key: string; url: string }> {
   const fd = new FormData()
   fd.append('file', file)
-  fd.append('dir', 'covers')
+  fd.append('dir', dir)
   const res = await fetch(apiUrl('/files/upload', 'POST'), {
     method: 'POST',
     headers: { ...authHeaders() },
@@ -18,9 +18,19 @@ export async function uploadCoverFile(file: File): Promise<{ key: string; url: s
   const key = data?.data?.key
   const url = data?.data?.publicUrl || ''
   if (!ok || !key) {
-    throw new Error(data?.msg || `封面上传失败（${res.status}）`)
+    throw new Error(data?.msg || `上传失败（${res.status}）`)
   }
   return { key, url: url || key }
+}
+
+/** 上传封面到对象存储，返回 storage key（入库）与临时访问 URL（展示） */
+export async function uploadCoverFile(file: File): Promise<{ key: string; url: string }> {
+  return uploadImageFile(file, 'covers')
+}
+
+/** 上传头像到对象存储 */
+export async function uploadAvatarFile(file: File): Promise<{ key: string; url: string }> {
+  return uploadImageFile(file, 'avatars')
 }
 
 /** 把管理员选中的 Word 文件真实上传到服务器（保存剧本成功后调用） */

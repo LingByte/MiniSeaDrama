@@ -92,6 +92,7 @@ func (h *Handlers) Login(c *gin.Context) {
 		Username: user.Username,
 	})
 
+	avatarURL, avatarKey := resolveAvatar(user.Avatar)
 	respgin.Success(c, types.TokenResponse{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
@@ -100,6 +101,8 @@ func (h *Handlers) Login(c *gin.Context) {
 		Role:         user.Role,
 		Email:        user.Email,
 		Username:     user.Username,
+		Avatar:       avatarURL,
+		AvatarKey:    avatarKey,
 	})
 }
 

@@ -6,6 +6,7 @@
 // Validation tags:
 //   - binding: gin/go-playground/validator built-in (triggered on ShouldBind)
 //   - validate: ling-base/common/validate (triggered on validate.Validate())
+//
 // Both can coexist; when the validate module is enabled, handlers
 // additionally call validate.Validate().
 package types
@@ -144,6 +145,8 @@ type TokenResponse struct {
 	Role         string `json:"role,omitempty"`
 	Email        string `json:"email,omitempty"`
 	Username     string `json:"username,omitempty"`
+	Avatar       string `json:"avatar,omitempty"`    // 展示用签名 URL
+	AvatarKey    string `json:"avatarKey,omitempty"` // 对象存储 key
 }
 
 // File storage DTOs

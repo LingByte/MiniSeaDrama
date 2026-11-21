@@ -138,6 +138,8 @@ func (h *Handlers) registerAuthRoutes(r *humax.Group) {
 		auth.POST("/login", h.Login)
 		auth.POST("/refresh", h.Refresh)
 	}
+	r.GET("/api/v1/me", h.GetMe)
+	r.PATCH("/api/v1/me", h.UpdateMe)
 }
 
 // registerUserRoutes registers user registration (public) + user CRUD endpoints.

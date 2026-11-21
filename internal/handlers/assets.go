@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LingByte/miniseadrama/internal/models"
 	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 )
 
@@ -116,4 +117,49 @@ func withResolvedCover(script map[string]any) map[string]any {
 		script["cover"] = ""
 	}
 	return script
+}
+
+// resolveAccessURL 展开对象存储 key / 旧路径为可访问 URL；已是 http(s) 则原样返回。
+func resolveAccessURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "data:") {
+		return ""
+	}
+	if resolved := pkgstorage.ResolveAccessURL(raw, pkgstorage.DisplayURLTTL); resolved != "" {
+		return resolved
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	return ""
+}
+
+// resolveAvatar 返回展示 URL + 入库 key（若有）。
+func resolveAvatar(raw string) (url string, key string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if pkgstorage.IsStorageKey(raw) {
+		return resolveAccessURL(raw), raw
+	}
+	if u := resolveAccessURL(raw); u != "" {
+		return u, ""
+	}
+	return "", ""
+}
+
+// enrichOrderAPI 补封面签名 URL；订单未存封面时回退到剧本 cover。
+func (h *Handlers) enrichOrderAPI(o models.Order, mine bool) map[string]any {
+	api := o.ToAPI(mine)
+	cover := strings.TrimSpace(o.Cover)
+	if cover == "" && h.db != nil && o.ScriptID != "" {
+		var row models.AdminScript
+		if err := h.db.Select("payload").First(&row, "script_id = ?", o.ScriptID).Error; err == nil {
+			script := row.ToScript()
+			cover = str(script["cover"])
+		}
+	}
+	api["cover"] = resolveAccessURL(cover)
+	return api
 }

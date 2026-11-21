@@ -179,7 +179,7 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, o := range rows {
-		out = append(out, o.ToAPI(true))
+		out = append(out, h.enrichOrderAPI(o, true))
 	}
 	respgin.Success(c, gin.H{"orders": out})
 }
@@ -612,7 +612,7 @@ func (h *Handlers) listAllOrdersAPI() []map[string]any {
 	_ = h.db.Order("created_at DESC").Find(&rows).Error
 	out := make([]map[string]any, 0, len(rows))
 	for _, o := range rows {
-		out = append(out, o.ToAPI(false))
+		out = append(out, h.enrichOrderAPI(o, false))
 	}
 	return out
 }
