@@ -172,7 +172,11 @@ export function Scripts() {
                   <TableCell className="pr-4">
                     <div className="flex justify-end gap-1 opacity-70 transition group-hover:opacity-100">
                       <IconBtn icon="edit" label="编辑" onClick={() => go(`/manage/scripts/edit/${s.id}`)} />
-                      <IconBtn icon="eye" label="前台预览" onClick={() => (s.status === 'on' ? go(`/script/${s.id}`) : toast('剧本未上架，前台不可见', 'info'))} />
+                      <IconBtn
+                        icon="eye"
+                        label={s.status === 'on' ? '前台预览' : '管理员预览'}
+                        onClick={() => go(s.status === 'on' ? `/script/${s.id}` : `/manage/scripts/preview/${s.id}`)}
+                      />
                       <IconBtn icon="trash" label="删除" danger onClick={() => setDel(s)} />
                     </div>
                   </TableCell>

@@ -22,6 +22,7 @@ function ManageRouter({ parts }: { parts: string[] }) {
   if (key === '' || key === 'scripts') return <Scripts />
   if (key === 'scripts/new') return <Editor />
   if (parts[0] === 'scripts' && parts[1] === 'edit') return <Editor id={parts[2]} />
+  if (parts[0] === 'scripts' && parts[1] === 'preview' && parts[2]) return <Detail id={parts[2]} adminPreview />
   if (key === 'pricing') return <Pricing />
   if (key === 'tags') return <Tags />
   if (key === 'orders') return <AdminOrders />

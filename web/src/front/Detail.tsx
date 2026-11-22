@@ -9,7 +9,7 @@ import { go, useStore } from '../lib/store'
 import { Checkout } from './Checkout'
 import { ScriptCard } from './ScriptCard'
 
-export function Detail({ id }: { id: string }) {
+export function Detail({ id, adminPreview = false }: { id: string; adminPreview?: boolean }) {
   const { state, toast } = useStore()
   const { user } = useAuth()
   const [full, setFull] = useState<Script | null>(null)
@@ -22,7 +22,7 @@ export function Detail({ id }: { id: string }) {
   const [progress, setProgress] = useState(0)
   const readerRef = useRef<HTMLDivElement>(null)
 
-  // 书架已改为分页卡片（无正文），详情页始终按 id 拉试读/全文
+  // 普通详情走 /scripts/:id（试读）；管理员预览走 /admin/scripts/:id（下架/草稿也可看全文）
   useEffect(() => {
     let alive = true
     setLoading(true)
@@ -30,7 +30,8 @@ export function Detail({ id }: { id: string }) {
     setFull(null)
     setRelated([])
     setEp(0)
-    void api<{ script: Script }>(`/scripts/${encodeURIComponent(id)}`)
+    const path = adminPreview ? `/admin/scripts/${encodeURIComponent(id)}` : `/scripts/${encodeURIComponent(id)}`
+    void api<{ script: Script }>(path)
       .then((r) => {
         if (!alive) return
         if (r?.script) setFull(r.script)
@@ -45,12 +46,12 @@ export function Detail({ id }: { id: string }) {
     return () => {
       alive = false
     }
-  }, [id, user])
+  }, [id, user, adminPreview])
 
-  // 同题材推荐：按首个情节标签拉一页卡片，排除当前剧
+  // 同题材推荐：按首个情节标签拉一页卡片，排除当前剧（管理员预览跳过）
   const relatedPlot = s?.tags?.[0] ?? ''
   useEffect(() => {
-    if (!s?.id || !relatedPlot) return
+    if (adminPreview || !s?.id || !relatedPlot) return
     let alive = true
     const qs = new URLSearchParams({ limit: '8', sort: 'hot', plot: relatedPlot })
     void api<{ scripts: Script[] }>(`/scripts?${qs}`)
@@ -64,7 +65,7 @@ export function Detail({ id }: { id: string }) {
     return () => {
       alive = false
     }
-  }, [s?.id, relatedPlot])
+  }, [s?.id, relatedPlot, adminPreview])
 
   useEffect(() => {
     const el = readerRef.current
@@ -89,17 +90,22 @@ export function Detail({ id }: { id: string }) {
       </div>
     )
 
-  if (fetchErr || !s || s.status !== 'on')
+  if (fetchErr || !s || (!adminPreview && s.status !== 'on'))
     return (
       <div className="mx-auto max-w-3xl py-24">
-        <Empty icon="book" title="剧本不存在或已下架" action={<Button onClick={() => go('/')}>返回剧本库</Button>} />
+        <Empty
+          icon="book"
+          title={adminPreview ? '剧本不存在' : '剧本不存在或已下架'}
+          action={<Button onClick={() => go(adminPreview ? '/manage/scripts' : '/')}>{adminPreview ? '返回剧本管理' : '返回剧本库'}</Button>}
+        />
       </div>
     )
 
-  const owned = !!user && state.orders.some((o) => o.account === user.email && o.status === 'paid' && o.scriptId === s.id)
-  const sold = !owned && isBuyoutSold(s)
+  const owned = adminPreview || (!!user && state.orders.some((o) => o.account === user.email && o.status === 'paid' && o.scriptId === s.id))
+  const sold = !adminPreview && !owned && isBuyoutSold(s)
   const q = quote(s)
   const buy = () => {
+    if (adminPreview) return toast('管理员预览模式，请到编辑页上架后再购买测试', 'info')
     if (sold) return toast('该剧本已被买断，暂不可购买', 'info')
     if (!user) {
       rememberNext(`/script/${s.id}`)
@@ -108,17 +114,26 @@ export function Detail({ id }: { id: string }) {
     }
     setCheckout(true)
   }
-  // 未购买：只信试读集数；接口也会截断 episodes，避免把后面集标题一起下发
+  // 管理员预览解锁全部；未购买只信试读集数
   const trialN = Math.max(1, Math.floor(Number(s.trialCount)) || 1)
   const unlocked = owned ? s.episodes.length : Math.min(trialN, s.episodes.length || trialN)
-  const lockedPreview = Math.min(Math.max(0, (s.totalEpisodes || 0) - unlocked), 12)
+  const lockedPreview = adminPreview ? 0 : Math.min(Math.max(0, (s.totalEpisodes || 0) - unlocked), 12)
 
   return (
     <div className="pt-2">
       <div className="fixed top-0 left-0 z-50 h-0.5 bg-primary transition-[width] duration-150" style={{ width: `${progress * 100}%` }} />
-      <button onClick={() => go('/')} className="group flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground">
+      {adminPreview && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span className="font-medium">管理员预览</span>
+          <span className="text-amber-700/80">当前状态：{s.status === 'on' ? '已上架' : s.status === 'draft' ? '草稿' : '已下架'} · 游客前台不可见</span>
+          <button type="button" className="ml-auto text-xs font-medium text-amber-800 underline" onClick={() => go(`/manage/scripts/edit/${s.id}`)}>
+            去编辑
+          </button>
+        </div>
+      )}
+      <button onClick={() => go(adminPreview ? '/manage/scripts' : '/')} className="group flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground">
         <Icon name="arrowLeft" size={16} className="transition-transform group-hover:-translate-x-0.5" />
-        剧本库
+        {adminPreview ? '剧本管理' : '剧本库'}
         <span className="text-border">/</span>
         <span className="text-foreground">{s.title}</span>
       </button>
