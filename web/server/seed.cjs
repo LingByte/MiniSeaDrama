@@ -18,8 +18,8 @@ exports.SALE_NOTE = {
     wholesale: { short: '适合自己折腾、试玩', long: '更适合自己研究、试拍、练手的玩法。同一部剧本会卖给多位买家，不适合直接拿去做正式生产。' },
     buyout: { short: '买下后独家使用', long: '适合正式投入生产。买下后这部剧本归你独家使用，不会再卖给其他人。' },
 };
-/** 买断剧本是否已被买走：完全以服务端计算的字段为准，不依赖本地订单（避免不同登录身份显示不一致） */
-const isBuyoutSold = (s) => s.buyoutSold === true;
+/** 买断剧本是否已被买走：须仍是买断售卖 + 服务端标记；改成批发后不再显示已买断 */
+const isBuyoutSold = (s) => s.saleType === 'buyout' && s.buyoutSold === true;
 exports.isBuyoutSold = isBuyoutSold;
 exports.DEFAULT_GROUPS = [
     { id: 'quality', name: '剧本质量', mode: 'single', system: true, desc: '内部质量分级，每部剧本只能有一个等级，前台展示并可按等级筛选', tags: ['S 顶级精品', 'A 优质', 'B 良好', 'C 基础', 'D 特价'] },
