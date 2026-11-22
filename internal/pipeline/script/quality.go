@@ -12,7 +12,10 @@ import (
 var (
 	truncatedMarkerRE = regexp.MustCompile(`(?i)truncated_by_max_tokens`)
 	sceneHouseRE       = regexp.MustCompile(`(?im)^\s*\d+\s*-\s*\d+\s+\S+`)
-	danglingTailRE     = regexp.MustCompile(`(?i)\b(the|a|an|and|or|but|to|of|for|with|that|this|is|are|was|were|be|been|have|has|had|will|would|can|could|should|may|might|i|you|he|she|we|they|my|your|his|her)\s*$`)
+	sceneHollywoodRE   = regexp.MustCompile(`(?im)^\s*(?:\*{0,2}\s*)?(?:INT\.|EXT\.)`)
+	// 半截句：以虚词收尾且无句末标点（故意省略号/破折号打断不算）
+	danglingTailRE = regexp.MustCompile(`(?i)\b(the|a|an|and|or|but|to|of|for|with|that|this|is|are|was|were|be|been|have|has|had|will|would|can|could|should|may|might)\s*$`)
+	refusalHeadRE  = regexp.MustCompile(`(?i)^\s*(I can'?t help with this request|I'?m not able to write|I cannot (?:write|create|generate)|as an AI language model|I must refuse)`)
 )
 
 // episodeQualityError 单集正文不合格原因（可重试）。
@@ -20,7 +23,28 @@ type episodeQualityError struct{ Reason string }
 
 func (e episodeQualityError) Error() string { return e.Reason }
 
+// isModelRefusal 拒写检测：开头即拒写，或全文拒写且几乎无场次。
+func isModelRefusal(text string) bool {
+	trim := strings.TrimSpace(text)
+	if trim == "" {
+		return false
+	}
+	head := trim
+	if rs := []rune(head); len(rs) > 800 {
+		head = string(rs[:800])
+	}
+	if refusalHeadRE.MatchString(head) {
+		return true
+	}
+	if !llmRefusalRE.MatchString(trim) {
+		return false
+	}
+	// 长拒写夹带空话：没有场次头则视为拒写
+	return !sceneHouseRE.MatchString(trim) && !sceneHollywoodRE.MatchString(trim)
+}
+
 // validateEpisodeText 检查单集是否可落盘：有 END、够长、未中途截断、有场次。
+// 调用方应先 isolate（不合成 END），再校验——缺 END 必须失败并重试。
 func validateEpisodeText(text string, n int) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -29,18 +53,18 @@ func validateEpisodeText(text string, n int) error {
 	if truncatedMarkerRE.MatchString(text) {
 		return episodeQualityError{"模型输出被 max_tokens 截断"}
 	}
-	if llmRefusalRE.MatchString(text) && len([]rune(text)) < 2500 {
+	if isModelRefusal(text) {
 		return episodeQualityError{"疑似模型拒写"}
 	}
 	runes := len([]rune(text))
-	if runes < 1200 {
+	if runes < 1000 {
 		return episodeQualityError{fmt.Sprintf("正文过短（%d 字）", runes)}
 	}
 	endRE := regexp.MustCompile(fmt.Sprintf(`(?i)END\s+OF\s+EPISODE\s+%d\b`, n))
 	if !endRE.MatchString(text) {
 		return episodeQualityError{fmt.Sprintf("缺少 END OF EPISODE %d", n)}
 	}
-	if !sceneHouseRE.MatchString(text) && !regexp.MustCompile(`(?im)^\s*(?:\*{0,2}\s*)?(?:INT\.|EXT\.)`).MatchString(text) {
+	if !sceneHouseRE.MatchString(text) && !sceneHollywoodRE.MatchString(text) {
 		return episodeQualityError{"缺少场次头（X-Y … 或 INT./EXT.）"}
 	}
 	if looksTruncatedBeforeEnd(text, n) {
@@ -49,7 +73,7 @@ func validateEpisodeText(text string, n int) error {
 	return nil
 }
 
-// looksTruncatedBeforeEnd：END 上一行内容以冠词/介词/连词结尾，或明显半截。
+// looksTruncatedBeforeEnd：END 上一行以虚词收尾且无句末标点；或 END 前只剩角色名。
 func looksTruncatedBeforeEnd(text string, n int) bool {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	endIdx := -1
@@ -66,7 +90,11 @@ func looksTruncatedBeforeEnd(text string, n int) bool {
 	prev := ""
 	for i := endIdx - 1; i >= 0; i-- {
 		s := strings.TrimSpace(lines[i])
-		if s == "" || s == "---" || s == "***" || strings.EqualFold(s, "FADE TO BLACK.") || strings.EqualFold(s, "FADE TO BLACK") {
+		if s == "" || s == "---" || s == "***" {
+			continue
+		}
+		u := strings.ToUpper(strings.Trim(s, ".*"))
+		if u == "FADE TO BLACK" || u == "FADE TO BLACK." || u == "CUT TO BLACK" || u == "SMASH TO BLACK" {
 			continue
 		}
 		prev = s
@@ -75,17 +103,21 @@ func looksTruncatedBeforeEnd(text string, n int) bool {
 	if prev == "" {
 		return true
 	}
-	// 去掉说话人行（全大写短词）后再判
 	if isCharacterCue(prev) {
 		return true // END 前只剩角色名 → 台词被截
 	}
 	cleaned := strings.Trim(prev, "\"'*`")
 	cleaned = strings.TrimSpace(cleaned)
+	// 故意戏剧打断：以 … / — / -- 收尾不算截断
+	if strings.HasSuffix(cleaned, "...") || strings.HasSuffix(cleaned, "…") ||
+		strings.HasSuffix(cleaned, "—") || strings.HasSuffix(cleaned, "--") {
+		return false
+	}
 	if danglingTailRE.MatchString(cleaned) {
 		return true
 	}
-	// 以逗号、破折号、省略未完成感结尾
-	if strings.HasSuffix(cleaned, ",") || strings.HasSuffix(cleaned, "—") || strings.HasSuffix(cleaned, "-") {
+	// 裸逗号收尾多半是截断；单独破折号已在上面放过
+	if strings.HasSuffix(cleaned, ",") {
 		return true
 	}
 	return false
@@ -97,6 +129,10 @@ func isCharacterCue(s string) bool {
 	if s == "" || len(s) > 40 {
 		return false
 	}
+	// 去掉 (V.O.) / (O.S.) 后缀再判
+	if i := strings.IndexByte(s, '('); i > 0 {
+		s = strings.TrimSpace(s[:i])
+	}
 	letters := 0
 	upper := 0
 	for _, r := range s {
@@ -107,7 +143,24 @@ func isCharacterCue(s string) bool {
 			}
 		}
 	}
-	return letters >= 2 && upper*10 >= letters*8 && !strings.Contains(s, ".")
+	if letters < 2 || strings.Contains(s, ".") {
+		return false
+	}
+	// ALL CAPS 角色行，或 Title Case 短名（Ethan / Noah Parker）
+	if upper*10 >= letters*8 {
+		return true
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 || len(words) > 4 {
+		return false
+	}
+	for _, w := range words {
+		rs := []rune(w)
+		if len(rs) == 0 || !unicode.IsUpper(rs[0]) {
+			return false
+		}
+	}
+	return true
 }
 
 // lockedCharacterNames 从策划人物卡抽出必须沿用的英文名。
@@ -163,7 +216,8 @@ func buildContinuityCard(prevEpisode string, prevPlanHook string) ContinuityCard
 	}
 	lines := strings.Split(strings.ReplaceAll(prevEpisode, "\r\n", "\n"), "\n")
 	sceneRE := regexp.MustCompile(`(?i)^\s*(\d+\s*-\s*\d+\s+.+)$|^\s*((?:INT\.|EXT\.)\s+.+)$`)
-	speakerRE := regexp.MustCompile(`(?i)^\s*\*{0,2}\s*([A-Z][A-Z0-9' \-]{1,28})\s*\*{0,2}\s*(?:\(|$)`)
+	// ALL CAPS 或 Title Case 角色行
+	speakerRE := regexp.MustCompile(`(?i)^\s*\*{0,2}\s*([A-Za-z][A-Za-z0-9' \-]{1,28})\s*\*{0,2}\s*(?:\(|$)`)
 	for i := len(lines) - 1; i >= 0; i-- {
 		s := strings.TrimSpace(lines[i])
 		if s == "" {
@@ -187,8 +241,26 @@ func buildContinuityCard(prevEpisode string, prevPlanHook string) ContinuityCard
 		}
 		name := strings.TrimSpace(m[1])
 		up := strings.ToUpper(name)
-		if up == "V.O" || up == "O.S" || up == "CONT'D" || strings.HasPrefix(up, "END OF") {
+		if up == "V.O" || up == "O.S" || up == "CONT'D" || strings.HasPrefix(up, "END OF") ||
+			up == "FADE IN" || up == "FADE OUT" || up == "CUT TO" {
 			continue
+		}
+		// 过滤普通句子：至少像专名（首字母大写词）
+		if !isCharacterCue(name) && !isCharacterCue(strings.ToUpper(name)) {
+			// ALL CAPS 短词仍收
+			letters := 0
+			upper := 0
+			for _, r := range name {
+				if unicode.IsLetter(r) {
+					letters++
+					if unicode.IsUpper(r) {
+						upper++
+					}
+				}
+			}
+			if letters < 2 || upper*2 < letters {
+				continue
+			}
 		}
 		if seen[up] {
 			continue
@@ -196,12 +268,10 @@ func buildContinuityCard(prevEpisode string, prevPlanHook string) ContinuityCard
 		seen[up] = true
 		card.LastSpeakers = append(card.LastSpeakers, name)
 	}
-	// 倒序取出的说话人再正回来，读起来自然
 	for i, j := 0, len(card.LastSpeakers)-1; i < j; i, j = i+1, j-1 {
 		card.LastSpeakers[i], card.LastSpeakers[j] = card.LastSpeakers[j], card.LastSpeakers[i]
 	}
 
-	// 结尾节选：只要最后约 500 字，足够看见钩子，不抢本集上下文
 	const tailRunes = 500
 	runes := []rune(prevEpisode)
 	tail := prevEpisode

@@ -43,6 +43,15 @@ func TestValidateEpisodeTextTruncated(t *testing.T) {
 	}
 }
 
+func TestValidateEpisodeTextAllowsDramaticDash(t *testing.T) {
+	raw := "Episode 2\n\n2-1 ROOM [INT.] [NIGHT]\n\nETHAN\nDon't you dare—\n\n" +
+		strings.Repeat("More action description that keeps the episode long enough for quality gate. ", 40) +
+		"\n\nEND OF EPISODE 2\n"
+	if err := validateEpisodeText(raw, 2); err != nil {
+		t.Fatalf("dramatic dash should pass: %v", err)
+	}
+}
+
 func TestValidateEpisodeTextMissingEnd(t *testing.T) {
 	raw := "Episode 1\n\n1-1 A [INT.] [DAY]\n\n" + strings.Repeat("body content enough. ", 80)
 	err := validateEpisodeText(raw, 1)
@@ -57,5 +66,23 @@ func TestValidateEpisodeTextMaxTokensMarker(t *testing.T) {
 	err := validateEpisodeText(raw, 1)
 	if err == nil || !strings.Contains(err.Error(), "max_tokens") {
 		t.Fatalf("want max_tokens error, got %v", err)
+	}
+}
+
+func TestIsModelRefusal(t *testing.T) {
+	if !isModelRefusal("I can't help with this request. The episodes include explicit content.") {
+		t.Fatal("expected refusal")
+	}
+	ok := "Episode 1\n\n1-1 ROOM [INT.] [NIGHT]\n\nETHAN\nHi.\n\n" + strings.Repeat("ok. ", 100) + "\nEND OF EPISODE 1\n"
+	if isModelRefusal(ok) {
+		t.Fatal("normal episode should not be refusal")
+	}
+}
+
+func TestIsolateEpisodeDoesNotSynthesizeEnd(t *testing.T) {
+	raw := "Episode 3\n\n3-1 A [INT.] [DAY]\n\nBody without end marker.\n"
+	got := isolateEpisode(raw, 3)
+	if strings.Contains(strings.ToUpper(got), "END OF EPISODE") {
+		t.Fatalf("should not synthesize END: %q", got)
 	}
 }
