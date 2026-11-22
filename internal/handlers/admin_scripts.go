@@ -140,7 +140,7 @@ func (h *Handlers) AdminAll(c *gin.Context) {
 		for i := range rows {
 			script := withResolvedCover(rows[i].ToScript())
 			slimEpisodeTexts(script, 0)
-			if sold[rows[i].ScriptID] {
+			if sold[rows[i].ScriptID] && strings.EqualFold(str(script["saleType"]), "buyout") {
 				script["buyoutSold"] = true
 			}
 			scripts = append(scripts, script)
@@ -182,7 +182,7 @@ func (h *Handlers) userOwnsScript(email, scriptID string) bool {
 	return n > 0
 }
 
-// GetAdminScript 返回单部剧本全文（含分集正文），供编辑页按需加载。
+// GetAdminScript 返回单部剧本全文（含分集正文），供编辑页 / 管理员预览按需加载。
 func (h *Handlers) GetAdminScript(c *gin.Context) {
 	row, err := h.loadAdminScriptRow(c, c.Param("id"))
 	if err != nil {
@@ -193,7 +193,13 @@ func (h *Handlers) GetAdminScript(c *gin.Context) {
 		respgin.WriteError(c, response.Err(response.CodeInternal))
 		return
 	}
-	respgin.Success(c, gin.H{"script": withResolvedCover(row.ToScript())})
+	script := withResolvedCover(row.ToScript())
+	_ = scriptdata.NormalizeEpisodes(script)
+	_ = scriptdata.RenumberScriptEpisodes(script)
+	if buyoutSold(h.db, row.ScriptID) && strings.EqualFold(str(script["saleType"]), "buyout") {
+		script["buyoutSold"] = true
+	}
+	respgin.Success(c, gin.H{"script": script})
 }
 
 // GetScript 前台按需拉单部剧本：仅已购用户拿全文；游客/管理员前台浏览一律试读。
@@ -209,7 +215,7 @@ func (h *Handlers) GetScript(c *gin.Context) {
 		return
 	}
 	script := withResolvedCover(row.ToScript())
-	if buyoutSold(h.db, row.ScriptID) {
+	if buyoutSold(h.db, row.ScriptID) && strings.EqualFold(str(script["saleType"]), "buyout") {
 		script["buyoutSold"] = true
 	}
 	h.ensureJWTClaims(c)

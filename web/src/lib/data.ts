@@ -83,8 +83,8 @@ export const SALE_NOTE: Record<SaleType, { short: string; long: string }> = {
   buyout: { short: '买下后独家使用', long: '适合正式投入生产。买下后这部剧本归你独家使用，不会再卖给其他人。' },
 }
 
-/** 买断剧本是否已被买走：完全以服务端计算的字段为准，不依赖本地订单（避免不同登录身份显示不一致） */
-export const isBuyoutSold = (s: Pick<Script, 'buyoutSold'>) => s.buyoutSold === true
+/** 买断剧本是否已被买走：须仍是买断售卖 + 服务端标记；改成批发后不再显示已买断 */
+export const isBuyoutSold = (s: Pick<Script, 'buyoutSold' | 'saleType'>) => s.saleType === 'buyout' && s.buyoutSold === true
 
 export interface TagGroup {
   id: string

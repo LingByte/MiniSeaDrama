@@ -225,7 +225,9 @@ func (h *Handlers) loadCatalogCards(ctx context.Context) ([]catalogCard, error) 
 		if !strings.EqualFold(str(script["status"]), "on") {
 			continue
 		}
-		cards = append(cards, toCatalogCard(script, sold[rows[i].ScriptID]))
+		// 仅当前仍是买断售卖、且已有买断成交时才标已买断（改成批发后不应再显示）
+		marked := sold[rows[i].ScriptID] && strings.EqualFold(str(script["saleType"]), "buyout")
+		cards = append(cards, toCatalogCard(script, marked))
 	}
 
 	catalogCache.mu.Lock()
