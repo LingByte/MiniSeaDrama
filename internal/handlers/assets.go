@@ -13,9 +13,10 @@ import (
 	pkgstorage "github.com/LingByte/miniseadrama/pkg/storage"
 )
 
-// persistCoverValue 把封面规范成「对象存储 key」：
+// persistCoverValue 把封面规范成「对象存储 key」入库：
 // - data:image… → 上传后返回 key
-// - 已是 http(s) / media URL → 尽量保留；过长 data 禁止入库
+// - 本站 CDN / media 签名 URL → 抽出 key（禁止把 ?e=&token= 写入 DB）
+// - 外链 http(s) → 去掉 query 后保存干净 URL
 // - 已是 storage key → 原样返回
 func persistCoverValue(scriptID, cover string) (string, error) {
 	cover = strings.TrimSpace(cover)
@@ -29,14 +30,23 @@ func persistCoverValue(scriptID, cover string) (string, error) {
 		}
 		return key, nil
 	}
+	// 本站对象（含过期七牛签名、本地 /api/v1/media）一律存 key，读时再签
+	if key := pkgstorage.CanonicalCoverKey(cover); key != "" {
+		return key, nil
+	}
 	if strings.HasPrefix(cover, "http://") || strings.HasPrefix(cover, "https://") {
 		if len(cover) > 2048 {
 			return "", fmt.Errorf("封面 URL 过长")
 		}
-		return cover, nil
+		parsed, err := url.Parse(cover)
+		if err != nil {
+			return "", fmt.Errorf("封面 URL 无效")
+		}
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String(), nil
 	}
 	if strings.HasPrefix(cover, pkgstorage.MediaPath) {
-		// 已签名 URL 不能入库（会过期）；尝试抽出 key
 		if k := extractMediaKey(cover); k != "" {
 			return k, nil
 		}
@@ -108,11 +118,11 @@ func withResolvedCover(script map[string]any) map[string]any {
 	if cover == "" {
 		return script
 	}
+	if key := pkgstorage.CanonicalCoverKey(cover); key != "" {
+		script["coverKey"] = key
+	}
 	if resolved := pkgstorage.ResolveAccessURL(cover, pkgstorage.DisplayURLTTL); resolved != "" {
 		script["cover"] = resolved
-		if pkgstorage.IsStorageKey(cover) {
-			script["coverKey"] = cover
-		}
 	} else if strings.HasPrefix(cover, "data:") {
 		script["cover"] = ""
 	}

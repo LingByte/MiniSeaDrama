@@ -369,7 +369,7 @@ function StepUpload({ f, set, setF, onFile, pending }: StepProps & { setF: (fn: 
       try {
         const { uploadCoverFile } = await import('../lib/files')
         const { url, key } = await uploadCoverFile(file)
-        // 预览用签名 URL；保存时服务端会抽出 object key 入库（禁止 base64）
+        // 预览用签名 URL；保存时服务端会抽出 object key 入库（禁止把 ?e=&token= 写入 DB）
         set('cover', url || key)
         toast('封面已上传到对象存储')
       } catch (e) {

@@ -110,11 +110,93 @@ func IsStorageKey(v string) bool {
 	return true
 }
 
+// isOurObjectHost reports whether host is our CDN / public object base
+// (e.g. soul.lingecho.com). Signed query strings on these hosts must not be persisted.
+func isOurObjectHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	if host == "soul.lingecho.com" {
+		return true
+	}
+	if PublicURLBase == "" {
+		return false
+	}
+	if pu, err := url.Parse(PublicURLBase); err == nil && pu.Host != "" {
+		return strings.EqualFold(pu.Host, host)
+	}
+	return false
+}
+
+// CanonicalCoverKey turns a signed CDN / media URL into a durable object key.
+// Returns empty when the value is an external URL or cannot be parsed.
+func CanonicalCoverKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "data:") {
+		return ""
+	}
+	// Local HMAC media URL: /api/v1/media?key=covers/... (relative or absolute)
+	if strings.Contains(raw, "key=") && strings.Contains(raw, MediaPath) {
+		toParse := raw
+		if strings.HasPrefix(raw, "/") {
+			toParse = "http://local.invalid" + raw
+		}
+		if parsed, err := url.Parse(toParse); err == nil {
+			key := strings.TrimSpace(parsed.Query().Get("key"))
+			if unesc, err := url.QueryUnescape(key); err == nil {
+				key = unesc
+			}
+			key = strings.TrimPrefix(key, "/")
+			if key != "" {
+				return key
+			}
+		}
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		if !isOurObjectHost(parsed.Hostname()) {
+			return ""
+		}
+		path := strings.TrimPrefix(parsed.EscapedPath(), "/")
+		path, _ = url.PathUnescape(path)
+		path = strings.TrimPrefix(path, "/")
+		return path
+	}
+	if IsStorageKey(raw) {
+		return strings.TrimPrefix(raw, "/")
+	}
+	return ""
+}
+
 // ResolveAccessURL expands a stored cover value into a browser-usable URL.
-// data: is rejected (returns empty); http(s) kept; storage keys get signed URLs.
+// data: is rejected; our CDN/media URLs (even with expired ?e=&token=) are
+// re-signed from the object key; foreign http(s) kept; bare keys get SignedURL.
 func ResolveAccessURL(stored string, ttl time.Duration) string {
 	stored = strings.TrimSpace(stored)
 	if stored == "" || strings.HasPrefix(stored, "data:") {
+		return ""
+	}
+	if key := CanonicalCoverKey(stored); key != "" {
+		u, err := SignedURL(key, ttl)
+		if err == nil {
+			return u
+		}
+		// Fall through for foreign https that CanonicalCoverKey skipped,
+		// or when signing fails on a bare key.
+		if IsStorageKey(stored) || strings.HasPrefix(stored, MediaPath) {
+			return ""
+		}
+		if strings.HasPrefix(stored, "http://") || strings.HasPrefix(stored, "https://") {
+			// Our host but signing failed — still don't return the expired token URL.
+			if parsed, err := url.Parse(stored); err == nil && isOurObjectHost(parsed.Hostname()) {
+				return ""
+			}
+			return stored
+		}
 		return ""
 	}
 	if strings.HasPrefix(stored, "http://") || strings.HasPrefix(stored, "https://") {
@@ -122,12 +204,6 @@ func ResolveAccessURL(stored string, ttl time.Duration) string {
 	}
 	if strings.HasPrefix(stored, MediaPath) {
 		return stored
-	}
-	if IsStorageKey(stored) {
-		u, err := SignedURL(stored, ttl)
-		if err == nil {
-			return u
-		}
 	}
 	return ""
 }

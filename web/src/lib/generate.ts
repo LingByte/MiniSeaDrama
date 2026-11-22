@@ -309,7 +309,7 @@ export async function generateCover(prompt: string, title: string, enTitle?: str
   if (payload.code !== 200 || !image) {
     throw new Error(payload.msg || '生图接口未返回图片')
   }
-  // 回传签名 URL 供预览；保存剧本时服务端会从 URL 抽出 object key 入库（禁止 base64）
+  // 回传签名 URL 供预览；保存剧本时服务端抽出 object key 入库（禁止把 ?e=&token= 写入 DB）
   return image
 }
 
