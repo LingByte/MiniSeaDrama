@@ -114,26 +114,10 @@ func main() {
 }
 
 func normalizeKey(cover string) string {
-	cover = strings.TrimSpace(cover)
-	if strings.Contains(cover, "key=") {
-		if i := strings.Index(cover, "key="); i >= 0 {
-			rest := cover[i+4:]
-			if j := strings.IndexAny(rest, "&"); j >= 0 {
-				rest = rest[:j]
-			}
-			rest = strings.ReplaceAll(rest, "%2F", "/")
-			rest = strings.ReplaceAll(rest, "%2f", "/")
-			return strings.TrimPrefix(rest, "/")
-		}
+	if key := pkgstorage.CanonicalCoverKey(cover); key != "" {
+		return key
 	}
-	if strings.HasPrefix(cover, "https://soul.lingecho.com/") {
-		p := strings.TrimPrefix(cover, "https://soul.lingecho.com/")
-		if q := strings.Index(p, "?"); q >= 0 {
-			p = p[:q]
-		}
-		return p
-	}
-	return strings.TrimPrefix(cover, "/")
+	return strings.TrimPrefix(strings.TrimSpace(cover), "/")
 }
 
 func readCoverSource(key string) ([]byte, string, error) {
