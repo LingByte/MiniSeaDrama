@@ -35,10 +35,14 @@ func ListCatalogPage(cookie, cursor, query string, limit int, loadedTitles []str
 	}
 
 	if !refresh {
-		return serveLocal(), nil
+		local := serveLocal()
+		// 本地有货直接返回；清空缓存后本地为空则自动打源头（不必再点「刷新」）
+		if len(local.Items) > 0 {
+			return local, nil
+		}
 	}
 
-	// 强制刷新：尝试源头，成功则写入缓存
+	// 强制刷新，或本地为空：尝试源头，成功则写入缓存
 	page, err := shortflix.DiscoverCatalogPage(cookie, cursor, query, limit)
 	if err != nil || len(page.Items) == 0 {
 		local := serveLocal()

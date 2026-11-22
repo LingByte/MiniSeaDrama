@@ -286,7 +286,8 @@ export function AiGenerate({ onApply }: Props) {
 
   function openCatalog() {
     setCatalogOpen(true)
-    void loadCatalog()
+    // 本地缓存被清空时，打开即强制拉 ShortFlix；有列表则仍走本地
+    void loadCatalog({ force: catalog.length === 0 })
   }
 
   function closeCatalog() {
