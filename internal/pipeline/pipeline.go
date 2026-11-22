@@ -782,7 +782,7 @@ func (p *Pipeline) finish(series shortflix.Series, workdir string, mergeResult m
 			skillBytes, _ := os.ReadFile(SkillPath())
 			batchSize := asInt(p.Params["batch_size"])
 			if batchSize <= 0 {
-				batchSize = 3
+				batchSize = 1
 			}
 			gen := &script.Generator{
 				Client: client, Skill: string(skillBytes), BatchSize: batchSize,

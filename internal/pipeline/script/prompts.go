@@ -23,7 +23,7 @@ const planSchema = `{
 const characterSchema = `{
   "characters": [
     {
-      "name": "角色名",
+      "name": "Full English Name (e.g. Ethan Parker)",
       "role": "protagonist|antagonist|support",
       "one_track": "单一动机",
       "contrast": "反差点",
@@ -41,7 +41,8 @@ const jsonHardRule = `硬性规则：
 4. 字符串内换行必须写成 \n，不要直接换行。
 5. 字段必须齐全；episodes 必须覆盖用户给出的每一集 number，不得省略。
 6. 每个 episode 的 event/emotion/hook 尽量短（各 ≤40 字），scenes 最多 2 条短句。
-7. 必须依据字幕里的实际台词/情节提炼，禁止输出占位或拒答文案（如「待定剧名」「Untitled Series」「原稿缺失」「无法生成」「无内容」「空白」「Content Missing」）。`
+7. 必须依据字幕里的实际台词/情节提炼，禁止输出占位或拒答文案（如「待定剧名」「Untitled Series」「原稿缺失」「无法生成」「无内容」「空白」「Content Missing」）。
+8. characters.name 必须是稳定英文全名（名+姓），全剧唯一，禁止同一人多个姓氏。`
 
 func skillSnippet(skill string) string {
 	s := strings.TrimSpace(skill)
@@ -77,6 +78,7 @@ func BuildCharacterMessages(skill string, plan map[string]any) []Message {
 		jsonHardRule,
 		"按下列 schema 输出人物卡 JSON：",
 		characterSchema,
+		"主角全名一旦确定，后续所有集必须沿用，禁止 Parker/Brooks 这类姓氏漂移。",
 		skillSnippet(skill),
 	}, "\n\n"))
 	raw, _ := json.Marshal(plan)
@@ -90,7 +92,14 @@ func BuildCharacterMessages(skill string, plan map[string]any) []Message {
 	}
 }
 
-func BuildEpisodeMessages(skill string, plan map[string]any, episodes []map[string]any, previousTail string) []Message {
+// EpisodePromptContext 单集写作上下文（人名锁定 + 结构化衔接）。
+type EpisodePromptContext struct {
+	NameLock     []string
+	Continuity   string // ContinuityCard.Format()，短状态卡而非整集正文
+	NextOutline  string
+}
+
+func BuildEpisodeMessages(skill string, plan map[string]any, episodes []map[string]any, ctx EpisodePromptContext) []Message {
 	nums := make([]string, 0, len(episodes))
 	for _, ep := range episodes {
 		nums = append(nums, fmt.Sprint(ep["number"]))
@@ -105,13 +114,26 @@ func BuildEpisodeMessages(skill string, plan map[string]any, episodes []map[stri
 		stage += "每集以 Episode N 开头，以 END OF EPISODE N 结尾。" +
 			"写完本批最后一集的 END OF EPISODE 立即停止，不要追加任何说明。"
 	}
+	stage += "\n连贯规则：" +
+		"1) 用【衔接卡】接戏：优先延续 last_location / present 人物与 open beat；" +
+		"若本集大纲要求换时换地，开场用一句 CAPTION 或新场次头标明（如 LATER / NEXT DAY），不要无说明硬切；" +
+		"2) 人物姓名必须严格使用【人物名锁定】列表，禁止改姓、改拼写；" +
+		"3) 台词与动作必须写完整，禁止半截句后直接 END OF EPISODE；" +
+		"4) 场次头用 集号-场号 LOCATION [INT.|EXT.] [DAY|NIGHT]；" +
+		"5) 【下一集大纲】只用于本集结尾留钩，禁止提前写出下一集正文情节。"
 	stage += "严禁输出：思考过程、<thinking>、交付说明、文件夹/Word 文件名、写作计划、自检清单、中文说明、Status/Writing Episodes 等元信息。"
 	system := strings.TrimSpace(skillSnippet(skill) + "\n\n" + stage)
+
+	nameLock := ctx.NameLock
+	if len(nameLock) == 0 {
+		nameLock = lockedCharacterNames(plan)
+	}
 	slim := map[string]any{
-		"title_cn": plan["title_cn"],
-		"title_en": plan["title_en"],
-		"logline":  plan["logline"],
-		"episode":  episodes[0],
+		"title_cn":  plan["title_cn"],
+		"title_en":  plan["title_en"],
+		"logline":   plan["logline"],
+		"name_lock": nameLock,
+		"episode":   episodes[0],
 	}
 	if !onlyOne {
 		slim["batch"] = episodes
@@ -119,7 +141,22 @@ func BuildEpisodeMessages(skill string, plan map[string]any, episodes []map[stri
 	}
 	raw, _ := json.Marshal(slim)
 	target := "Episode " + strings.Join(nums, ", Episode ")
-	user := fmt.Sprintf("策划摘要：%s\n上一集结尾：%s\n本次只写：%s", string(raw), previousTail, target)
+	cont := strings.TrimSpace(ctx.Continuity)
+	if cont == "" {
+		cont = "(无，本集为开篇)"
+	}
+	next := strings.TrimSpace(ctx.NextOutline)
+	if next == "" {
+		next = "(未提供)"
+	}
+	user := fmt.Sprintf(
+		"策划摘要：%s\n\n【人物名锁定】%s\n\n【衔接卡】\n%s\n\n【下一集大纲｜仅作钩子参考】%s\n\n本次只写：%s",
+		string(raw),
+		strings.Join(nameLock, ", "),
+		cont,
+		next,
+		target,
+	)
 	return []Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},

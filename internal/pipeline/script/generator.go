@@ -102,6 +102,10 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	if len(episodes) == 0 {
 		return nil, LLMError{"策划阶段没有产出分集大纲。"}
 	}
+	nameLock := lockedCharacterNames(plan)
+	if len(nameLock) > 0 {
+		g.Emit("log", fmt.Sprintf("人物名已锁定：%s", strings.Join(nameLock, ", ")), nil)
+	}
 	g.Emit("log", fmt.Sprintf("策划完成：%v，共 %d 集。", plan["title_en"], len(episodes)), map[string]any{
 		"title_cn": plan["title_cn"], "title_en": plan["title_en"], "episode_count": len(episodes),
 	})
@@ -109,112 +113,64 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	var scripts []string
 	var episodeList []map[string]any
 	total := len(episodes)
-	for i := 0; i < total; {
+	for i := 0; i < total; i++ {
 		g.Wait()
-		end := i + g.BatchSize
-		if end > total {
-			end = total
+		ep := episodes[i]
+		n := asInt(ep["number"])
+		if n < 1 {
+			n = i + 1
 		}
-		batch := episodes[i:end]
-		first := asInt(batch[0]["number"])
-		last := asInt(batch[len(batch)-1]["number"])
+		path := filepath.Join(episodesDir, fmt.Sprintf("E%03d.md", n))
 
-		// 一集一文件；批量时仍按集切开落盘，避免再靠整剧正则猜边界
-		allCached := true
-		cachedParts := make([]string, 0, len(batch))
-		for _, ep := range batch {
-			n := asInt(ep["number"])
-			p := filepath.Join(episodesDir, fmt.Sprintf("E%03d.md", n))
-			// 兼容旧批量文件名
-			if st, err := os.Stat(p); err != nil || st.Size() == 0 {
-				legacy := filepath.Join(episodesDir, fmt.Sprintf("E%03d-E%03d.md", first, last))
-				if len(batch) > 1 {
-					if st2, err2 := os.Stat(legacy); err2 == nil && st2.Size() > 0 {
-						allCached = false
-						break
-					}
-				}
-				allCached = false
-				break
+		prevFull := ""
+		prevHook := ""
+		if len(scripts) > 0 {
+			prevFull = scripts[len(scripts)-1]
+			if i > 0 {
+				prevHook = planHook(episodes[i-1])
 			}
-			data, _ := os.ReadFile(p)
-			cachedParts = append(cachedParts, string(data))
 		}
-		if allCached && len(cachedParts) == len(batch) {
-			for bi, part := range cachedParts {
-				n := asInt(batch[bi]["number"])
-				part = isolateEpisode(CleanScriptText(part), n)
+		ctx := EpisodePromptContext{
+			NameLock:    nameLock,
+			Continuity:  buildContinuityCard(prevFull, prevHook).Format(),
+			NextOutline: nextEpisodeOutline(episodes, i),
+		}
+
+		// 合格缓存直接复用；不合格缓存删掉重写
+		if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+			data, _ := os.ReadFile(path)
+			part := isolateEpisode(CleanScriptText(string(data)), n)
+			if err := validateEpisodeText(part, n); err == nil {
 				scripts = append(scripts, part)
 				episodeList = append(episodeList, map[string]any{
 					"title": fmt.Sprintf("第 %d 集", n),
 					"text":  part,
 				})
+				g.Emit("script_progress", fmt.Sprintf("第 %d 集已存在且合格，直接复用。", n), map[string]any{
+					"batch": i + 1, "batches": total, "episode": n,
+				})
+				continue
 			}
-			g.Emit("script_progress", fmt.Sprintf("第 %d~%d 集已存在，直接复用。", first, last), map[string]any{
-				"batch": i/g.BatchSize + 1, "batches": (total+g.BatchSize-1)/g.BatchSize, "episode": last,
-			})
-			i = end
-			continue
+			g.Emit("log", fmt.Sprintf("第 %d 集缓存不合格（%v），重新生成。", n, err), nil)
+			_ = os.Remove(path)
 		}
 
-		previousTail := ""
-		if len(scripts) > 0 {
-			joined := scripts[len(scripts)-1]
-			if len(joined) > 1500 {
-				previousTail = joined[len(joined)-1500:]
-			} else {
-				previousTail = joined
-			}
-		}
-		label := fmt.Sprintf("第 %d 集", first)
-		if last != first {
-			label = fmt.Sprintf("第 %d~%d 集", first, last)
-		}
-		g.Emit("script_progress", fmt.Sprintf("正在写%s（%d/%d）。", label, i+1, total), map[string]any{
-			"batch": i + 1, "batches": total, "episode": first,
+		g.Emit("script_progress", fmt.Sprintf("正在写第 %d 集（%d/%d）。", n, i+1, total), map[string]any{
+			"batch": i + 1, "batches": total, "episode": n,
 		})
-		text, err := g.Client.Chat(BuildEpisodeMessages(g.Skill, plan, batch, previousTail), false)
+		part, err := g.writeEpisodeWithRetry(plan, ep, ctx, n)
 		if err != nil {
 			return nil, err
 		}
-		if llmRefusalRE.MatchString(text) && len([]rune(text)) < 2000 {
-			return nil, LLMError{fmt.Sprintf("%s被模型拒写（安全策略），请换模型或改大纲后重跑。", label)}
-		}
-
-		for _, ep := range batch {
-			n := asInt(ep["number"])
-			part := isolateEpisode(text, n)
-			if strings.TrimSpace(part) == "" {
-				// 批量输出里缺这一集：单独补写
-				solo, err := g.Client.Chat(BuildEpisodeMessages(g.Skill, plan, []map[string]any{ep}, previousTail), false)
-				if err != nil {
-					return nil, err
-				}
-				if llmRefusalRE.MatchString(solo) && len([]rune(solo)) < 2000 {
-					return nil, LLMError{fmt.Sprintf("第 %d 集被模型拒写（安全策略），请换模型或改大纲后重跑。", n)}
-				}
-				part = isolateEpisode(solo, n)
-			}
-			part = CleanScriptText(part)
-			part = isolateEpisode(part, n)
-			if strings.TrimSpace(part) == "" {
-				return nil, LLMError{fmt.Sprintf("第 %d 集正文为空，已中止。", n)}
-			}
-			_ = os.WriteFile(filepath.Join(episodesDir, fmt.Sprintf("E%03d.md", n)), []byte(part), 0o644)
-			scripts = append(scripts, part)
-			episodeList = append(episodeList, map[string]any{
-				"title": fmt.Sprintf("第 %d 集", n),
-				"text":  part,
-			})
-			previousTail = part
-			if len(previousTail) > 1500 {
-				previousTail = previousTail[len(previousTail)-1500:]
-			}
-		}
-		g.Emit("script_progress", fmt.Sprintf("%s完成。", label), map[string]any{
-			"batch": i + 1, "batches": total, "episode": last,
+		_ = os.WriteFile(path, []byte(part), 0o644)
+		scripts = append(scripts, part)
+		episodeList = append(episodeList, map[string]any{
+			"title": fmt.Sprintf("第 %d 集", n),
+			"text":  part,
 		})
-		i = end
+		g.Emit("script_progress", fmt.Sprintf("第 %d 集完成。", n), map[string]any{
+			"batch": i + 1, "batches": total, "episode": n,
+		})
 	}
 
 	fullScript := strings.Join(scripts, "\n\n")
@@ -255,6 +211,45 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		"meta":          meta,
 		"meta_json":     metaPath,
 	}, nil
+}
+
+// writeEpisodeWithRetry 单集生成：抬高 max_tokens，质量不合格自动重试。
+func (g *Generator) writeEpisodeWithRetry(plan map[string]any, ep map[string]any, ctx EpisodePromptContext, n int) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		g.Wait()
+		msgs := BuildEpisodeMessages(g.Skill, plan, []map[string]any{ep}, ctx)
+		if attempt > 1 {
+			msgs = append(msgs, Message{
+				Role: "user",
+				Content: fmt.Sprintf(
+					"上一次 Episode %d 不合格：%v。请重写完整一集：场次齐全、台词写完、最后一行必须是 END OF EPISODE %d；严格使用人物名锁定，并从上一集结尾自然接续。",
+					n, lastErr, n,
+				),
+			})
+		}
+		text, err := g.Client.ChatOpt(msgs, ChatOptions{
+			JSONMode:    false,
+			MaxTokens:   12288,
+			Temperature: 0.75,
+		})
+		if err != nil {
+			lastErr = err
+			g.Emit("log", fmt.Sprintf("第 %d 集请求失败（%d/3）：%v", n, attempt, err), nil)
+			continue
+		}
+		part := isolateEpisode(CleanScriptText(text), n)
+		if err := validateEpisodeText(part, n); err != nil {
+			lastErr = err
+			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, err), nil)
+			continue
+		}
+		return part, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("未知错误")
+	}
+	return "", LLMError{fmt.Sprintf("第 %d 集生成失败：%v", n, lastErr)}
 }
 
 func (g *Generator) chatJSON(messages []Message, label string, maxTokens int) (map[string]any, error) {
