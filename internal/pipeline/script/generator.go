@@ -32,7 +32,10 @@ type Generator struct {
 
 var (
 	codeFenceLineRE = regexp.MustCompile(`(?i)^` + "```" + `[a-zA-Z]*\s*$`)
-	episodeHeaderRE = regexp.MustCompile(`(?im)^\s*Episode\s+(\d+)\s*$`)
+	// 模型常写 **Episode 1** / EPISODE 1 / Episode 1 — 必须都能切开，否则只会吃到裸写的 Episode 10
+	episodeHeaderRE = regexp.MustCompile(`(?im)^\s*(?:\*{0,2}\s*)?(?:Episode|EP)\s+(\d+)\s*(?:\*{0,2})?\s*$`)
+	endEpisodeNumRE = regexp.MustCompile(`(?i)END OF EPISODE\s+(\d+)`)
+	llmRefusalRE    = regexp.MustCompile(`(?i)I can'?t help with this request|I'?m not able to write|I cannot (?:write|create|generate)|as an AI`)
 )
 
 // Generate produces script artifacts under workdir/output.
@@ -44,10 +47,10 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		g.Wait = func() {}
 	}
 	if g.BatchSize < 1 {
-		g.BatchSize = 3
+		g.BatchSize = 1 // 默认一集一调，避免批量输出再靠正则硬切
 	}
-	if g.BatchSize > 10 {
-		g.BatchSize = 10
+	if g.BatchSize > 6 {
+		g.BatchSize = 6
 	}
 	outputDir := filepath.Join(workdir, "output")
 	episodesDir := filepath.Join(outputDir, "episodes")
@@ -104,56 +107,117 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	})
 
 	var scripts []string
-	totalBatches := (len(episodes) + g.BatchSize - 1) / g.BatchSize
-	for batchIndex := 0; batchIndex < totalBatches; batchIndex++ {
+	var episodeList []map[string]any
+	total := len(episodes)
+	for i := 0; i < total; {
 		g.Wait()
-		start := batchIndex * g.BatchSize
-		end := start + g.BatchSize
-		if end > len(episodes) {
-			end = len(episodes)
+		end := i + g.BatchSize
+		if end > total {
+			end = total
 		}
-		batch := episodes[start:end]
+		batch := episodes[i:end]
 		first := asInt(batch[0]["number"])
 		last := asInt(batch[len(batch)-1]["number"])
-		batchName := fmt.Sprintf("E%03d-E%03d.md", first, last)
-		batchPath := filepath.Join(episodesDir, batchName)
-		if st, err := os.Stat(batchPath); err == nil && st.Size() > 0 {
-			data, _ := os.ReadFile(batchPath)
-			scripts = append(scripts, string(data))
+
+		// 一集一文件；批量时仍按集切开落盘，避免再靠整剧正则猜边界
+		allCached := true
+		cachedParts := make([]string, 0, len(batch))
+		for _, ep := range batch {
+			n := asInt(ep["number"])
+			p := filepath.Join(episodesDir, fmt.Sprintf("E%03d.md", n))
+			// 兼容旧批量文件名
+			if st, err := os.Stat(p); err != nil || st.Size() == 0 {
+				legacy := filepath.Join(episodesDir, fmt.Sprintf("E%03d-E%03d.md", first, last))
+				if len(batch) > 1 {
+					if st2, err2 := os.Stat(legacy); err2 == nil && st2.Size() > 0 {
+						allCached = false
+						break
+					}
+				}
+				allCached = false
+				break
+			}
+			data, _ := os.ReadFile(p)
+			cachedParts = append(cachedParts, string(data))
+		}
+		if allCached && len(cachedParts) == len(batch) {
+			for bi, part := range cachedParts {
+				n := asInt(batch[bi]["number"])
+				part = isolateEpisode(CleanScriptText(part), n)
+				scripts = append(scripts, part)
+				episodeList = append(episodeList, map[string]any{
+					"title": fmt.Sprintf("第 %d 集", n),
+					"text":  part,
+				})
+			}
 			g.Emit("script_progress", fmt.Sprintf("第 %d~%d 集已存在，直接复用。", first, last), map[string]any{
-				"batch": batchIndex + 1, "batches": totalBatches, "episode": last,
+				"batch": i/g.BatchSize + 1, "batches": (total+g.BatchSize-1)/g.BatchSize, "episode": last,
 			})
+			i = end
 			continue
 		}
+
 		previousTail := ""
 		if len(scripts) > 0 {
-			joined := strings.Join(scripts, "\n")
+			joined := scripts[len(scripts)-1]
 			if len(joined) > 1500 {
 				previousTail = joined[len(joined)-1500:]
 			} else {
 				previousTail = joined
 			}
 		}
-		g.Emit("script_progress", fmt.Sprintf("正在写第 %d~%d 集（%d/%d）。", first, last, batchIndex+1, totalBatches), map[string]any{
-			"batch": batchIndex + 1, "batches": totalBatches, "episode": first,
+		label := fmt.Sprintf("第 %d 集", first)
+		if last != first {
+			label = fmt.Sprintf("第 %d~%d 集", first, last)
+		}
+		g.Emit("script_progress", fmt.Sprintf("正在写%s（%d/%d）。", label, i+1, total), map[string]any{
+			"batch": i + 1, "batches": total, "episode": first,
 		})
 		text, err := g.Client.Chat(BuildEpisodeMessages(g.Skill, plan, batch, previousTail), false)
 		if err != nil {
 			return nil, err
 		}
-		text = sliceEpisodeText(text, first)
-		scripts = append(scripts, text)
-		_ = os.WriteFile(batchPath, []byte(text), 0o644)
-		g.Emit("script_progress", fmt.Sprintf("第 %d~%d 集完成。", first, last), map[string]any{
-			"batch": batchIndex + 1, "batches": totalBatches, "episode": last,
+		if llmRefusalRE.MatchString(text) && len([]rune(text)) < 2000 {
+			return nil, LLMError{fmt.Sprintf("%s被模型拒写（安全策略），请换模型或改大纲后重跑。", label)}
+		}
+
+		for _, ep := range batch {
+			n := asInt(ep["number"])
+			part := isolateEpisode(text, n)
+			if strings.TrimSpace(part) == "" {
+				// 批量输出里缺这一集：单独补写
+				solo, err := g.Client.Chat(BuildEpisodeMessages(g.Skill, plan, []map[string]any{ep}, previousTail), false)
+				if err != nil {
+					return nil, err
+				}
+				if llmRefusalRE.MatchString(solo) && len([]rune(solo)) < 2000 {
+					return nil, LLMError{fmt.Sprintf("第 %d 集被模型拒写（安全策略），请换模型或改大纲后重跑。", n)}
+				}
+				part = isolateEpisode(solo, n)
+			}
+			part = CleanScriptText(part)
+			part = isolateEpisode(part, n)
+			if strings.TrimSpace(part) == "" {
+				return nil, LLMError{fmt.Sprintf("第 %d 集正文为空，已中止。", n)}
+			}
+			_ = os.WriteFile(filepath.Join(episodesDir, fmt.Sprintf("E%03d.md", n)), []byte(part), 0o644)
+			scripts = append(scripts, part)
+			episodeList = append(episodeList, map[string]any{
+				"title": fmt.Sprintf("第 %d 集", n),
+				"text":  part,
+			})
+			previousTail = part
+			if len(previousTail) > 1500 {
+				previousTail = previousTail[len(previousTail)-1500:]
+			}
+		}
+		g.Emit("script_progress", fmt.Sprintf("%s完成。", label), map[string]any{
+			"batch": i + 1, "batches": total, "episode": last,
 		})
+		i = end
 	}
 
-	cleaned := make([]string, len(scripts))
-	for i, s := range scripts {
-		cleaned[i] = CleanScriptText(s)
-	}
-	fullScript := strings.Join(cleaned, "\n\n")
+	fullScript := strings.Join(scripts, "\n\n")
 	scriptMD := filepath.Join(outputDir, "剧本.md")
 	_ = os.WriteFile(scriptMD, []byte(fullScript), 0o644)
 
@@ -165,7 +229,7 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	if titleEN == "" {
 		titleEN = "Untitled"
 	}
-	meta := buildMeta(plan, rating, fullScript)
+	meta := buildMeta(plan, rating, episodeList)
 	metaPath := filepath.Join(outputDir, "设定要点.json")
 	if err := writeJSON(metaPath, meta); err != nil {
 		return nil, err
@@ -370,7 +434,7 @@ func sliceEpisodeText(text string, firstNumber int) string {
 		}
 	}
 	cleaned := strings.TrimSpace(strings.Join(lines, "\n"))
-	specific := regexp.MustCompile(fmt.Sprintf(`(?im)^\s*Episode\s+%d\s*$`, firstNumber))
+	specific := regexp.MustCompile(fmt.Sprintf(`(?im)^\s*(?:\*{0,2}\s*)?(?:Episode|EP)\s+%d\s*(?:\*{0,2})?\s*$`, firstNumber))
 	if loc := specific.FindStringIndex(cleaned); loc != nil {
 		return strings.TrimSpace(cleaned[loc[0]:])
 	}
@@ -402,7 +466,7 @@ func qualityFullLabel(grade string) string {
 	}
 }
 
-func buildMeta(plan, rating map[string]any, fullScript string) map[string]any {
+func buildMeta(plan, rating map[string]any, episodeList []map[string]any) map[string]any {
 	categories, _ := plan["categories"].(map[string]any)
 	if categories == nil {
 		categories = map[string]any{}
@@ -432,7 +496,6 @@ func buildMeta(plan, rating map[string]any, fullScript string) map[string]any {
 		// 英文标题由 /cover 接口按 enTitle 注入生图提示，这里只保留画面描述
 		prompt += "，竖版 3:4 短剧海报，电影感光影，主体居中，高清细节"
 	}
-	episodeList := splitEpisodes(fullScript)
 	audienceText := main + strings.Join(subs, "")
 	audience := "女频"
 	if strings.Contains(audienceText, "男频") {
@@ -461,14 +524,54 @@ func buildMeta(plan, rating map[string]any, fullScript string) map[string]any {
 	}
 }
 
-func splitEpisodes(text string) []map[string]any {
-	matches := episodeHeaderRE.FindAllStringSubmatchIndex(text, -1)
-	if len(matches) == 0 {
-		body := strings.TrimSpace(text)
-		if body == "" {
-			return nil
+// isolateEpisode 从模型输出里抽出第 n 集：从 Episode n 起，到 END OF EPISODE n 止（含），丢掉粘上的下一集。
+func isolateEpisode(text string, n int) string {
+	if n < 1 || strings.TrimSpace(text) == "" {
+		return strings.TrimSpace(text)
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	startRE := regexp.MustCompile(fmt.Sprintf(`(?im)^\s*(?:\*{0,2}\s*)?(?:Episode|EP)\s+%d\s*(?:\*{0,2})?\s*$`, n))
+	endInlineRE := regexp.MustCompile(fmt.Sprintf(`(?i)END\s+OF\s+EPISODE\s+%d`, n))
+
+	lines := strings.Split(text, "\n")
+	startIdx := -1
+	for i, line := range lines {
+		if startRE.MatchString(strings.TrimSpace(line)) {
+			startIdx = i
+			break
 		}
-		return []map[string]any{{"title": "第 1 集", "text": body}}
+	}
+	var body string
+	if startIdx >= 0 {
+		body = strings.Join(lines[startIdx:], "\n")
+	} else {
+		body = fmt.Sprintf("Episode %d\n\n%s", n, strings.TrimSpace(text))
+	}
+
+	if loc := endInlineRE.FindStringIndex(body); loc != nil {
+		// 保留 END OF EPISODE N 本身，丢掉其后所有内容（含 ****Episode 3）
+		body = strings.TrimRight(body[:loc[1]], " \t*") + "\n"
+	} else {
+		body = strings.TrimSpace(body) + fmt.Sprintf("\n\nEND OF EPISODE %d\n", n)
+	}
+	return strings.TrimSpace(body) + "\n"
+}
+
+func splitEpisodes(text string) []map[string]any {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	matches := episodeHeaderRE.FindAllStringSubmatchIndex(text, -1)
+	endMatches := endEpisodeNumRE.FindAllStringSubmatchIndex(text, -1)
+	// 标题行过少（常见：只有裸写的 Episode 10）时，改用 END OF EPISODE 切开，避免丢掉 **Episode 1** 批次
+	if len(matches) < 2 || (len(endMatches) >= 2 && len(endMatches) > len(matches)+2) {
+		if parts := splitByEndOfEpisode(text); len(parts) >= 2 {
+			return parts
+		}
+	}
+	if len(matches) == 0 {
+		return []map[string]any{{"title": "第 1 集", "text": text}}
 	}
 	var out []map[string]any
 	for i, m := range matches {
@@ -478,9 +581,50 @@ func splitEpisodes(text string) []map[string]any {
 		if i+1 < len(matches) {
 			end = matches[i+1][0]
 		}
+		body := strings.TrimSpace(text[start:end])
+		if len([]rune(body)) < 40 {
+			continue
+		}
 		out = append(out, map[string]any{
 			"title": fmt.Sprintf("第 %d 集", num),
-			"text":  strings.TrimSpace(text[start:end]),
+			"text":  body,
+		})
+	}
+	if len(out) == 0 {
+		return []map[string]any{{"title": "第 1 集", "text": text}}
+	}
+	return out
+}
+
+func splitByEndOfEpisode(text string) []map[string]any {
+	locs := endEpisodeNumRE.FindAllStringSubmatchIndex(text, -1)
+	if len(locs) == 0 {
+		return nil
+	}
+	var out []map[string]any
+	start := 0
+	for _, loc := range locs {
+		num, _ := strconv.Atoi(text[loc[2]:loc[3]])
+		end := loc[1]
+		if i := strings.IndexByte(text[end:], '\n'); i >= 0 {
+			end = end + i
+		} else {
+			end = len(text)
+		}
+		body := strings.TrimSpace(text[start:end])
+		start = end
+		for start < len(text) && (text[start] == '\n' || text[start] == '\r' || text[start] == ' ') {
+			start++
+		}
+		if len([]rune(body)) < 80 {
+			continue
+		}
+		if num < 1 {
+			num = len(out) + 1
+		}
+		out = append(out, map[string]any{
+			"title": fmt.Sprintf("第 %d 集", num),
+			"text":  body,
 		})
 	}
 	return out

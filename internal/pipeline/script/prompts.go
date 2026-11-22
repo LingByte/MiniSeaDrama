@@ -91,21 +91,35 @@ func BuildCharacterMessages(skill string, plan map[string]any) []Message {
 }
 
 func BuildEpisodeMessages(skill string, plan map[string]any, episodes []map[string]any, previousTail string) []Message {
-	stage := "【逐集正文】输出英文剧本正文（非 JSON）。每集以 Episode N 开头，以 END OF EPISODE N 结尾。"
-	system := strings.TrimSpace(skillSnippet(skill) + "\n\n" + stage)
-	var targets []string
+	nums := make([]string, 0, len(episodes))
 	for _, ep := range episodes {
-		targets = append(targets, fmt.Sprintf("Episode %v", ep["number"]))
+		nums = append(nums, fmt.Sprint(ep["number"]))
 	}
-	// 正文阶段不需要完整 plan，压缩体积
+	onlyOne := len(episodes) == 1
+	stage := "【逐集正文】只输出英文剧本正文（非 JSON）。"
+	if onlyOne {
+		n := nums[0]
+		stage += fmt.Sprintf("本次只写 Episode %s 一集：第一行必须是 Episode %s，最后一行必须是 END OF EPISODE %s。", n, n, n) +
+			"严禁输出下一集、上一集或其它集数；写完 END OF EPISODE 立即停止。"
+	} else {
+		stage += "每集以 Episode N 开头，以 END OF EPISODE N 结尾。" +
+			"写完本批最后一集的 END OF EPISODE 立即停止，不要追加任何说明。"
+	}
+	stage += "严禁输出：思考过程、<thinking>、交付说明、文件夹/Word 文件名、写作计划、自检清单、中文说明、Status/Writing Episodes 等元信息。"
+	system := strings.TrimSpace(skillSnippet(skill) + "\n\n" + stage)
 	slim := map[string]any{
 		"title_cn": plan["title_cn"],
 		"title_en": plan["title_en"],
 		"logline":  plan["logline"],
-		"batch":    episodes,
+		"episode":  episodes[0],
+	}
+	if !onlyOne {
+		slim["batch"] = episodes
+		delete(slim, "episode")
 	}
 	raw, _ := json.Marshal(slim)
-	user := fmt.Sprintf("策划摘要：%s\n上一批结尾：%s\n本次集数：%s", string(raw), previousTail, strings.Join(targets, ", "))
+	target := "Episode " + strings.Join(nums, ", Episode ")
+	user := fmt.Sprintf("策划摘要：%s\n上一集结尾：%s\n本次只写：%s", string(raw), previousTail, target)
 	return []Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},

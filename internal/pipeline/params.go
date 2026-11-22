@@ -37,7 +37,7 @@ func ValidateJobParams(payload map[string]any) (map[string]any, error) {
 		"cookie": fmt.Sprint(payload["cookie"]),
 		"engine": engine,
 		"workers": clampInt(payload["workers"], 3, 1, 6),
-		"batch_size": clampInt(payload["batch_size"], 3, 1, 6),
+		"batch_size": clampInt(payload["batch_size"], 1, 1, 6),
 		"force_asr": boolParam(payload["force_asr"]),
 		"redo_asr":  boolParam(payload["redo_asr"]),
 		"ffmpeg":    strings.TrimSpace(fmt.Sprint(payload["ffmpeg"])),
