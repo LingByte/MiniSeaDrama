@@ -112,6 +112,8 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 
 	var scripts []string
 	var episodeList []map[string]any
+	var episodeErrors []map[string]any
+	lastOKIdx := -1
 	total := len(episodes)
 	for i := 0; i < total; i++ {
 		g.Wait()
@@ -124,11 +126,9 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 
 		prevFull := ""
 		prevHook := ""
-		if len(scripts) > 0 {
+		if lastOKIdx >= 0 {
 			prevFull = scripts[len(scripts)-1]
-			if i > 0 {
-				prevHook = planHook(episodes[i-1])
-			}
+			prevHook = planHook(episodes[lastOKIdx])
 		}
 		ctx := EpisodePromptContext{
 			NameLock:    nameLock,
@@ -146,6 +146,7 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 					"title": fmt.Sprintf("第 %d 集", n),
 					"text":  part,
 				})
+				lastOKIdx = i
 				g.Emit("script_progress", fmt.Sprintf("第 %d 集已存在且合格，直接复用。", n), map[string]any{
 					"batch": i + 1, "batches": total, "episode": n,
 				})
@@ -160,7 +161,13 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		})
 		part, err := g.writeEpisodeWithRetry(plan, ep, ctx, n)
 		if err != nil {
-			return nil, err
+			// 单集失败不中断全剧：记错跳过，用上一成功集继续衔接
+			g.Emit("log", fmt.Sprintf("第 %d 集跳过：%v", n, err), nil)
+			episodeErrors = append(episodeErrors, map[string]any{
+				"episode": n, "error": err.Error(),
+			})
+			_ = os.Remove(path)
+			continue
 		}
 		_ = os.WriteFile(path, []byte(part), 0o644)
 		scripts = append(scripts, part)
@@ -168,9 +175,21 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 			"title": fmt.Sprintf("第 %d 集", n),
 			"text":  part,
 		})
+		lastOKIdx = i
 		g.Emit("script_progress", fmt.Sprintf("第 %d 集完成。", n), map[string]any{
 			"batch": i + 1, "batches": total, "episode": n,
 		})
+	}
+
+	if len(episodeList) == 0 {
+		return nil, LLMError{"全部集数生成失败，未产出可用正文。"}
+	}
+	if len(episodeErrors) > 0 {
+		g.Emit("log", fmt.Sprintf("有 %d 集失败已跳过，成功 %d/%d 集。", len(episodeErrors), len(episodeList), total), nil)
+	}
+	// 失败过多：仍交付已成功部分，但标严重缺口（调用方可提示重跑）
+	if len(episodeList)*2 < total {
+		g.Emit("log", fmt.Sprintf("警告：成功集不足一半（%d/%d），建议清缓存后重跑失败集。", len(episodeList), total), nil)
 	}
 
 	fullScript := strings.Join(scripts, "\n\n")
@@ -199,18 +218,23 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		return nil, err
 	}
 	g.Emit("log", "剧本与设定 Word 已生成。", nil)
-	return map[string]any{
-		"title_cn":      plan["title_cn"],
-		"title_en":      titleEN,
-		"episode_count": len(episodes),
-		"plan_json":     planPath,
-		"script_md":     scriptMD,
-		"script_docx":   scriptDocx,
-		"setting_docx":  settingDocx,
-		"rating":        rating,
-		"meta":          meta,
-		"meta_json":     metaPath,
-	}, nil
+	out := map[string]any{
+		"title_cn":       plan["title_cn"],
+		"title_en":       titleEN,
+		"episode_count":  len(episodeList),
+		"episode_planned": total,
+		"plan_json":      planPath,
+		"script_md":      scriptMD,
+		"script_docx":    scriptDocx,
+		"setting_docx":   settingDocx,
+		"rating":         rating,
+		"meta":           meta,
+		"meta_json":      metaPath,
+	}
+	if len(episodeErrors) > 0 {
+		out["episode_errors"] = episodeErrors
+	}
+	return out, nil
 }
 
 // writeEpisodeWithRetry 单集生成：抬高 max_tokens，质量不合格自动重试。
@@ -238,7 +262,19 @@ func (g *Generator) writeEpisodeWithRetry(plan map[string]any, ep map[string]any
 			g.Emit("log", fmt.Sprintf("第 %d 集请求失败（%d/3）：%v", n, attempt, err), nil)
 			continue
 		}
-		part := isolateEpisode(CleanScriptText(text), n)
+		cleaned := CleanScriptText(text)
+		if truncatedMarkerRE.MatchString(cleaned) {
+			lastErr = episodeQualityError{"模型输出被 max_tokens 截断"}
+			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, lastErr), nil)
+			continue
+		}
+		if isModelRefusal(cleaned) {
+			lastErr = episodeQualityError{"疑似模型拒写"}
+			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, lastErr), nil)
+			continue
+		}
+		// 不合成 END：缺结尾必须重试，避免假合格
+		part := isolateEpisode(cleaned, n)
 		if err := validateEpisodeText(part, n); err != nil {
 			lastErr = err
 			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, err), nil)
@@ -546,9 +582,8 @@ func isolateEpisode(text string, n int) string {
 	if loc := endInlineRE.FindStringIndex(body); loc != nil {
 		// 保留 END OF EPISODE N 本身，丢掉其后所有内容（含 ****Episode 3）
 		body = strings.TrimRight(body[:loc[1]], " \t*") + "\n"
-	} else {
-		body = strings.TrimSpace(body) + fmt.Sprintf("\n\nEND OF EPISODE %d\n", n)
 	}
+	// 故意不自动补 END：交给 validateEpisodeText 判失败并重试
 	return strings.TrimSpace(body) + "\n"
 }
 
