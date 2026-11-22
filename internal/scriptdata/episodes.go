@@ -10,7 +10,7 @@ import (
 )
 
 // 兼容 AI 落库脏数据：整剧糊成一集，正文里用 Episode N / 第 N 集 分段。
-var episodeHeaderRE = regexp.MustCompile(`(?im)^\s*(?:\*{0,2}\s*)?(?:Episode|EP)\s+(\d+)\s*(?:\*{0,2})?\s*$|^\s*第\s*(\d+)\s*集\b`)
+var episodeHeaderRE = regexp.MustCompile(`(?im)^\s*(?:\*{0,2}\s*)?(?:Episode|EP)\s+(\d+)\s*(?:\*{0,2})?\s*$|^\s*第\s*(\d+)\s*集\b|^\s*#{1,3}\s*Episode\s+(\d+)\b`)
 
 // SplitEpisodeText 按集标题切开正文；切不开则原样返回一集。
 func SplitEpisodeText(text string) []map[string]any {
@@ -21,7 +21,12 @@ func SplitEpisodeText(text string) []map[string]any {
 		if body == "" {
 			return nil
 		}
-		return []map[string]any{{"title": "第 1 集", "text": body}}
+		n := EpisodeNumberFromText(body)
+		title := "第 1 集"
+		if n > 0 {
+			title = fmt.Sprintf("第 %d 集", n)
+		}
+		return []map[string]any{{"title": title, "text": body}}
 	}
 	out := make([]map[string]any, 0, len(matches))
 	for i, m := range matches {
@@ -36,7 +41,7 @@ func SplitEpisodeText(text string) []map[string]any {
 			continue
 		}
 		out = append(out, map[string]any{
-			"title": "", // 下面按顺序重编号，不沿用源稿 Episode 4/5/6
+			"title": "",
 			"text":  body,
 		})
 	}
@@ -47,9 +52,56 @@ func SplitEpisodeText(text string) []map[string]any {
 	return out
 }
 
-// RenumberEpisodeTitles 按数组顺序写成「第 1 集」「第 2 集」…，避免源稿缺集导致「EP01=第4集」。
+var endEpisodeNumRE = regexp.MustCompile(`(?i)END OF EPISODE\s+(\d+)`)
+
+// EpisodeNumberFromText 从正文提取真实集号（优先 END OF EPISODE N）。
+func EpisodeNumberFromText(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	if ms := endEpisodeNumRE.FindAllStringSubmatch(text, -1); len(ms) > 0 {
+		n, _ := strconv.Atoi(ms[len(ms)-1][1])
+		if n > 0 {
+			return n
+		}
+	}
+	if m := episodeHeaderRE.FindStringSubmatch(text); len(m) > 0 {
+		for _, g := range m[1:] {
+			if g == "" {
+				continue
+			}
+			n, _ := strconv.Atoi(g)
+			if n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// RenumberEpisodeTitles 优先用正文 END OF EPISODE / Episode N；多数无标记时才按数组顺序。
 func RenumberEpisodeTitles(eps []map[string]any) {
+	if len(eps) == 0 {
+		return
+	}
+	nums := make([]int, len(eps))
+	marked := 0
 	for i := range eps {
+		nums[i] = EpisodeNumberFromText(str(eps[i]["text"]))
+		if nums[i] > 0 {
+			marked++
+		}
+	}
+	useContent := marked*2 >= len(eps)
+	seen := map[int]bool{}
+	for i := range eps {
+		n := nums[i]
+		if useContent && n > 0 && !seen[n] {
+			eps[i]["title"] = fmt.Sprintf("第 %d 集", n)
+			seen[n] = true
+			continue
+		}
 		eps[i]["title"] = fmt.Sprintf("第 %d 集", i+1)
 	}
 }
@@ -60,27 +112,31 @@ func RenumberScriptEpisodes(script map[string]any) bool {
 		return false
 	}
 	changed := false
-	switch eps := script["episodes"].(type) {
-	case []map[string]any:
+	apply := func(eps []map[string]any) {
+		before := make([]string, len(eps))
 		for i := range eps {
-			want := fmt.Sprintf("第 %d 集", i+1)
-			if str(eps[i]["title"]) != want {
-				eps[i]["title"] = want
+			before[i] = str(eps[i]["title"])
+		}
+		RenumberEpisodeTitles(eps)
+		for i := range eps {
+			if str(eps[i]["title"]) != before[i] {
 				changed = true
 			}
 		}
+	}
+	switch eps := script["episodes"].(type) {
+	case []map[string]any:
+		apply(eps)
 	case []any:
+		mapped := make([]map[string]any, 0, len(eps))
 		for i := range eps {
 			m, ok := eps[i].(map[string]any)
 			if !ok {
 				continue
 			}
-			want := fmt.Sprintf("第 %d 集", i+1)
-			if str(m["title"]) != want {
-				m["title"] = want
-				changed = true
-			}
+			mapped = append(mapped, m)
 		}
+		apply(mapped)
 	}
 	return changed
 }
