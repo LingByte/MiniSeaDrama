@@ -240,9 +240,20 @@ export function Toaster() {
   )
 }
 
+/** 剧本行大多是单换行；Markdown 会把单 \\n 挤成空格，先拆成段落。 */
+function paragraphifyScript(text: string) {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    // 已有空行保留；单换行升格为段落分隔
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/([^\n])\n(?!\n)/g, '$1\n\n')
+    .trim()
+}
+
 /** 剧本 / 试读正文：按 Markdown 渲染（标题、加粗、列表、分隔线等） */
 export function ScriptText({ text, size = 'md' }: { text: string; size?: 'md' | 'lg' }) {
-  const source = (text || '')
+  const source = paragraphifyScript(text || '')
     // 旧版「【卡点】」行转成引用块，方便在 MD 里继续高亮
     .replace(/^(【卡点】)(.*)$/gm, (_, _tag: string, rest: string) => `> **卡点** ${rest.trim()}`)
   const base = size === 'lg' ? 'text-[16px]' : 'text-sm'
@@ -267,7 +278,7 @@ export function ScriptText({ text, size = 'md' }: { text: string; size?: 'md' | 
           h4: ({ children }) => (
             <h4 className="mt-4 mb-1.5 text-[13px] font-semibold text-foreground first:mt-0">{children}</h4>
           ),
-          p: ({ children }) => <p className="my-2.5 text-foreground/90">{children}</p>,
+          p: ({ children }) => <p className="my-1.5 text-foreground/90">{children}</p>,
           strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
           em: ({ children }) => <em className="italic text-muted-foreground">{children}</em>,
           ul: ({ children }) => <ul className="my-3 list-disc space-y-1.5 pl-5 text-foreground/90">{children}</ul>,
