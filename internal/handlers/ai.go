@@ -191,7 +191,7 @@ func (h *Handlers) AICreateJob(c *gin.Context) {
 		"workers": 3, "batch_size": 1,
 		"llm": map[string]any{
 			"base_url": aiBaseURL(), "api_key": key, "model": aiTextModel(),
-			"temperature": 0.8, "max_tokens": 8192, "timeout": 900,
+			"temperature": 0.8, "max_tokens": 12288, "timeout": 900,
 		},
 	})
 	if err != nil {

@@ -157,7 +157,11 @@ func (c *LLMClient) ChatOpt(messages []Message, opt ChatOptions) (string, error)
 		ct := resp.Header.Get("Content-Type")
 		var text string
 		if stream || strings.Contains(ct, "event-stream") || bytes.Contains(body, []byte("data:")) {
-			text = readStream(body)
+			var finish string
+			text, finish = readStream(body)
+			if finish == "length" && !strings.Contains(text, "truncated_by_max_tokens") {
+				text += "\n/* truncated_by_max_tokens */"
+			}
 		} else {
 			var parsed struct {
 				Choices []struct {
@@ -191,7 +195,7 @@ func (c *LLMClient) ChatOpt(messages []Message, opt ChatOptions) (string, error)
 	return "", LLMError{fmt.Sprintf("模型请求失败：%v", last)}
 }
 
-func readStream(body []byte) string {
+func readStream(body []byte) (text string, finishReason string) {
 	var pieces []string
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	buf := make([]byte, 0, 64*1024)
@@ -210,14 +214,18 @@ func readStream(body []byte) string {
 				Delta struct {
 					Content any `json:"content"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 		}
 		if json.Unmarshal([]byte(chunk), &payload) != nil || len(payload.Choices) == 0 {
 			continue
 		}
 		pieces = append(pieces, contentToString(payload.Choices[0].Delta.Content))
+		if fr := strings.TrimSpace(payload.Choices[0].FinishReason); fr != "" {
+			finishReason = fr
+		}
 	}
-	return strings.TrimSpace(strings.Join(pieces, ""))
+	return strings.TrimSpace(strings.Join(pieces, "")), finishReason
 }
 
 func contentToString(v any) string {
