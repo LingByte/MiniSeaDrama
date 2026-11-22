@@ -194,6 +194,7 @@ func (h *Handlers) GetAdminScript(c *gin.Context) {
 		return
 	}
 	script := withResolvedCover(row.ToScript())
+	_ = scriptdata.CleanScriptEpisodes(script)
 	_ = scriptdata.NormalizeEpisodes(script)
 	_ = scriptdata.RenumberScriptEpisodes(script)
 	if buyoutSold(h.db, row.ScriptID) && strings.EqualFold(str(script["saleType"]), "buyout") {
@@ -222,6 +223,7 @@ func (h *Handlers) GetScript(c *gin.Context) {
 	email, _, _ := h.currentAccount(c)
 	full := h.userOwnsScript(email, row.ScriptID)
 	// 脏数据：整剧糊成 1 集时先按 Episode 标记拆开；标题按顺序重编号，避免「EP01=第4集」
+	_ = scriptdata.CleanScriptEpisodes(script)
 	_ = scriptdata.NormalizeEpisodes(script)
 	_ = scriptdata.RenumberScriptEpisodes(script)
 	if !full {
@@ -445,6 +447,9 @@ func (h *Handlers) saveScript(c *gin.Context, id string, script map[string]any) 
 		return nil, errors.New("database unavailable")
 	}
 	script["id"] = id
+	_ = scriptdata.CleanScriptEpisodes(script)
+	_ = scriptdata.NormalizeEpisodes(script)
+	_ = scriptdata.RenumberScriptEpisodes(script)
 	// 封面禁止 base64 入库：data URL 上传对象存储，只存 key
 	if cover, err := persistCoverValue(id, str(script["cover"])); err != nil {
 		return nil, err

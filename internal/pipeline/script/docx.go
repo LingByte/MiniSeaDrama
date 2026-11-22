@@ -10,37 +10,20 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/LingByte/miniseadrama/internal/scriptdata"
 )
 
 var (
-	episodeLineRE = regexp.MustCompile(`(?i)^Episode\s+\d+\s*$`)
+	episodeLineRE = regexp.MustCompile(`(?i)^\*{0,2}\s*Episode\s+\d+\s*\*{0,2}$`)
 	sceneHeaderRE = regexp.MustCompile(`(?i)^\d+\s*-\s*\d+\s+.+\[(?:INT|EXT)\.?\]\s*\[(?:DAY|NIGHT)\]`)
 	endEpisodeRE  = regexp.MustCompile(`(?i)END OF EPISODE\s+\d+`)
 	endSeriesRE   = regexp.MustCompile(`(?i)END OF SERIES`)
-	codeFenceRE   = regexp.MustCompile(`(?i)^` + "```" + `[a-zA-Z]*\s*$`)
-	watermarkRE   = regexp.MustCompile(`(?i)(` +
-		`由\s*(?:AI|人工智能|大模型|ChatGPT|Claude|GPT).{0,20}(?:生成|创作|撰写|辅助)` +
-		`|(?:AI|人工智能|大模型|ChatGPT|Claude|GPT|机器)\s*(?:生成|创作|撰写|写作)` +
-		`|(?:generated|created|written)\s+(?:by|with)\s+(?:AI|ChatGPT|Claude|GPT)` +
-		`|AI[- ]generated` +
-		`|本(?:剧本|文档|作品|内容).{0,20}(?:AI|人工智能).{0,20}` +
-		`)`)
 )
 
-// CleanScriptText strips fences and AI watermark lines.
+// CleanScriptText strips fences、水印、thinking / 交付说明等拼进正文的垃圾。
 func CleanScriptText(text string) string {
-	var lines []string
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-		stripped := strings.TrimSpace(line)
-		if codeFenceRE.MatchString(stripped) {
-			continue
-		}
-		if stripped != "" && watermarkRE.MatchString(stripped) {
-			continue
-		}
-		lines = append(lines, strings.TrimRight(line, " \t"))
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return scriptdata.CleanEpisodeText(text)
 }
 
 type para struct {
