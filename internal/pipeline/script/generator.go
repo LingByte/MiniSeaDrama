@@ -61,15 +61,16 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	}
 
 	// 策划阶段字幕过长会把输出挤爆 max_tokens，导致 JSON 被截断。
-	planTranscript := transcript
-	const planTranscriptLimit = 80_000
-	if len(planTranscript) > planTranscriptLimit {
-		planTranscript = planTranscript[:planTranscriptLimit] + "\n…(transcript truncated for planning)"
-	}
+	// 关键：不能简单按字数硬切前 N 字——那样 80 集只够覆盖前 15 集，
+	// LLM 根本不知道后面的集存在。策略是每集取固定篇幅，让每一集都至少出现一行。
+	const perEpisodeHeadChars = 1_500
+	const planMaxChars = 100_000
+	planTranscript := trimTranscriptForPlanning(transcript, perEpisodeHeadChars, planMaxChars)
+	totalEpisodesHint := countTranscriptEpisodes(planTranscript)
 
 	g.Wait()
-	g.Emit("log", "正在生成全剧策划与分集大纲。", nil)
-	plan, err := g.chatJSON(BuildPlanMessages(g.Skill, planTranscript), "策划阶段", 24576)
+	g.Emit("log", fmt.Sprintf("正在生成全剧策划与分集大纲（字幕覆盖约 %d 集）。", totalEpisodesHint), nil)
+	plan, err := g.chatJSON(BuildPlanMessages(g.Skill, planTranscript, totalEpisodesHint), "策划阶段", 24576)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +103,12 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	if len(episodes) == 0 {
 		return nil, LLMError{"策划阶段没有产出分集大纲。"}
 	}
+	// LLM 常偷懒只给前几集写大纲，导致后面全部跳过。补齐缺失的集号，
+	// 让后续逐集写作阶段能覆盖全部集数。缺失集只给占位大纲（number + event + hook），
+	// 写剧本时 LLM 会结合衔接卡自己编。
+	if totalEpisodesHint > len(episodes) {
+		episodes = fillMissingEpisodeOutlines(episodes, totalEpisodesHint, g.Emit)
+	}
 	nameLock := lockedCharacterNames(plan)
 	if len(nameLock) > 0 {
 		g.Emit("log", fmt.Sprintf("人物名已锁定：%s", strings.Join(nameLock, ", ")), nil)
@@ -113,7 +120,8 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	var scripts []string
 	var episodeList []map[string]any
 	var episodeErrors []map[string]any
-	lastOKIdx := -1
+	var failedIdx []int // 第 i 轮循环中，第几次循环失败
+	var lastOKIdx = -1
 	total := len(episodes)
 	for i := 0; i < total; i++ {
 		g.Wait()
@@ -127,7 +135,7 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		prevFull := ""
 		prevHook := ""
 		if lastOKIdx >= 0 {
-			prevFull = scripts[len(scripts)-1]
+			prevFull = scripts[lastOKIdx]
 			prevHook = planHook(episodes[lastOKIdx])
 		}
 		ctx := EpisodePromptContext{
@@ -161,12 +169,13 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		})
 		part, err := g.writeEpisodeWithRetry(plan, ep, ctx, n)
 		if err != nil {
-			// 单集失败不中断全剧：记错跳过，用上一成功集继续衔接
-			g.Emit("log", fmt.Sprintf("第 %d 集跳过：%v", n, err), nil)
-			episodeErrors = append(episodeErrors, map[string]any{
-				"episode": n, "error": err.Error(),
+			g.Emit("log", fmt.Sprintf("第 %d 集第一轮失败：%v，将进入全局补救轮。", n, err), nil)
+			failedIdx = append(failedIdx, i)
+			scripts = append(scripts, "") // 占位，后面回填
+			episodeList = append(episodeList, map[string]any{
+				"title": fmt.Sprintf("第 %d 集", n),
+				"text":  "", // 空，后面回填
 			})
-			_ = os.Remove(path)
 			continue
 		}
 		_ = os.WriteFile(path, []byte(part), 0o644)
@@ -181,15 +190,55 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 		})
 	}
 
+	// 全局补救轮：把第一轮失败的集，用更激进的 prompt 再重写一次。
+	// 此时 scripts 里相邻集都已经成功，可以给更强的衔接上下文。
+	if len(failedIdx) > 0 {
+		g.Emit("log", fmt.Sprintf("进入全局补救轮，重写 %d 个失败集。", len(failedIdx)), nil)
+		for _, i := range failedIdx {
+			g.Wait()
+			ep := episodes[i]
+			n := asInt(ep["number"])
+			path := filepath.Join(episodesDir, fmt.Sprintf("E%03d.md", n))
+
+			prevFull := ""
+			prevHook := ""
+			for p := i - 1; p >= 0; p-- {
+				if scripts[p] != "" {
+					prevFull = scripts[p]
+					prevHook = planHook(episodes[p])
+					break
+				}
+			}
+			ctx := EpisodePromptContext{
+				NameLock:    nameLock,
+				Continuity:  buildContinuityCard(prevFull, prevHook).Format(),
+				NextOutline: nextEpisodeOutline(episodes, i),
+			}
+			part, err := g.rewriteFailedEpisode(plan, ep, ctx, n, scripts, i)
+			if err != nil {
+				g.Emit("log", fmt.Sprintf("第 %d 集补救轮仍失败：%v，用占位保底。", n, err), nil)
+				episodeErrors = append(episodeErrors, map[string]any{
+					"episode": n, "error": err.Error(),
+				})
+				_ = os.Remove(path)
+				part = fmt.Sprintf("Episode %d\n\n⚠️ Script generation failed: %v\n", n, err)
+			} else {
+				_ = os.WriteFile(path, []byte(part), 0o644)
+				g.Emit("log", fmt.Sprintf("第 %d 集补救轮成功。", n), nil)
+			}
+			scripts[i] = part
+			episodeList[i] = map[string]any{
+				"title": fmt.Sprintf("第 %d 集", n),
+				"text":  part,
+			}
+		}
+	}
+
 	if len(episodeList) == 0 {
 		return nil, LLMError{"全部集数生成失败，未产出可用正文。"}
 	}
 	if len(episodeErrors) > 0 {
-		g.Emit("log", fmt.Sprintf("有 %d 集失败已跳过，成功 %d/%d 集。", len(episodeErrors), len(episodeList), total), nil)
-	}
-	// 失败过多：仍交付已成功部分，但标严重缺口（调用方可提示重跑）
-	if len(episodeList)*2 < total {
-		g.Emit("log", fmt.Sprintf("警告：成功集不足一半（%d/%d），建议清缓存后重跑失败集。", len(episodeList), total), nil)
+		g.Emit("log", fmt.Sprintf("最终仍有 %d 集失败（已用占位保底）。建议清缓存后单独重跑失败集。", len(episodeErrors)), nil)
 	}
 
 	fullScript := strings.Join(scripts, "\n\n")
@@ -238,46 +287,52 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 }
 
 // writeEpisodeWithRetry 单集生成：抬高 max_tokens，质量不合格自动重试。
+// 重试 5 次，每次给模型不同的具体修正指令，避免模型"同错重犯"。
 func (g *Generator) writeEpisodeWithRetry(plan map[string]any, ep map[string]any, ctx EpisodePromptContext, n int) (string, error) {
+	const maxAttempts = 5
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		g.Wait()
 		msgs := BuildEpisodeMessages(g.Skill, plan, []map[string]any{ep}, ctx)
 		if attempt > 1 {
 			msgs = append(msgs, Message{
 				Role: "user",
-				Content: fmt.Sprintf(
-					"上一次 Episode %d 不合格：%v。请重写完整一集：场次齐全、台词写完、最后一行必须是 END OF EPISODE %d；严格使用人物名锁定，并从上一集结尾自然接续。",
-					n, lastErr, n,
-				),
+				Content: specificRetryPrompt(n, lastErr, attempt, maxAttempts),
 			})
+		}
+		temp := 0.75
+		if attempt >= 3 {
+			temp = 0.6 // 后两次降温度，让模型更"听话"
+		}
+		maxToks := 12288
+		if attempt >= 4 {
+			maxToks = 16384 // 最后一次给更多 token 避免截断
 		}
 		text, err := g.Client.ChatOpt(msgs, ChatOptions{
 			JSONMode:    false,
-			MaxTokens:   12288,
-			Temperature: 0.75,
+			MaxTokens:   maxToks,
+			Temperature: temp,
 		})
 		if err != nil {
 			lastErr = err
-			g.Emit("log", fmt.Sprintf("第 %d 集请求失败（%d/3）：%v", n, attempt, err), nil)
+			g.Emit("log", fmt.Sprintf("第 %d 集请求失败（%d/%d）：%v", n, attempt, maxAttempts, err), nil)
 			continue
 		}
 		cleaned := CleanScriptText(text)
 		if truncatedMarkerRE.MatchString(cleaned) {
 			lastErr = episodeQualityError{"模型输出被 max_tokens 截断"}
-			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, lastErr), nil)
+			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/%d）：%v", n, attempt, maxAttempts, lastErr), nil)
 			continue
 		}
 		if isModelRefusal(cleaned) {
 			lastErr = episodeQualityError{"疑似模型拒写"}
-			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, lastErr), nil)
+			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/%d）：%v", n, attempt, maxAttempts, lastErr), nil)
 			continue
 		}
-		// 不合成 END：缺结尾必须重试，避免假合格
 		part := isolateEpisode(cleaned, n)
 		if err := validateEpisodeText(part, n); err != nil {
 			lastErr = err
-			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/3）：%v", n, attempt, err), nil)
+			g.Emit("log", fmt.Sprintf("第 %d 集质检未过（%d/%d）：%v", n, attempt, maxAttempts, err), nil)
 			continue
 		}
 		return part, nil
@@ -285,7 +340,29 @@ func (g *Generator) writeEpisodeWithRetry(plan map[string]any, ep map[string]any
 	if lastErr == nil {
 		lastErr = fmt.Errorf("未知错误")
 	}
-	return "", LLMError{fmt.Sprintf("第 %d 集生成失败：%v", n, lastErr)}
+	return "", LLMError{fmt.Sprintf("第 %d 集生成失败（已重试 %d 次）：%v", n, maxAttempts, lastErr)}
+}
+
+// specificRetryPrompt 根据上次具体失败原因，给模型针对性的修正指令。
+func specificRetryPrompt(n int, lastErr error, attempt, maxAttempts int) string {
+	base := fmt.Sprintf("[第 %d 次重写（%d/%d）]", attempt, attempt, maxAttempts)
+	msg := strings.TrimSpace(lastErr.Error())
+	switch {
+	case strings.Contains(msg, "截断") || strings.Contains(msg, "max_tokens"):
+		return base + `上一次输出被截断。这次务必：先把开头和场次头写简洁，省出 token 给结尾；正文台词与动作写到 8–10 场景；最后一行必须完整写 "END OF EPISODE ` + fmt.Sprint(n) + `" 然后立即停笔，不要追加任何东西。`
+	case strings.Contains(msg, "END OF EPISODE"):
+		return base + fmt.Sprintf(`上一次缺少 "END OF EPISODE %d" 结尾标记。这次写完完整正文后，**务必在最后一行独立写出**: END OF EPISODE %d\n写完就停，不要追加任何思考、说明、下一集标题或其它内容。`, n, n)
+	case strings.Contains(msg, "场次头") || strings.Contains(msg, "场景"):
+		return base + `上一次没有写出好莱坞标准场次头。请按格式: 集号-场号 LOCATION [INT./EXT.] [DAY/NIGHT] 开始每一场。示例: "1-1 DOCTOR'S OFFICE - INT. - DAY"`
+	case strings.Contains(msg, "过短") || strings.Contains(msg, "字数"):
+		return base + `上一次正文太短。请写完整一集：至少 6–8 场、每场 2–3 行台词+动作；人物互动丰富、有冲突或转折。`
+	case strings.Contains(msg, "拒写"):
+		return base + `上一次你似乎在拒写。请直接写剧本正文，不要解释为什么不能写，不要道歉，不要写思考过程。`
+	case strings.Contains(msg, "半截句") || strings.Contains(msg, "截断"):
+		return base + `上一次 END 前的台词像是被截断。请确保每句台词完整说完，END OF EPISODE 前最后一句必须以句号/感叹号/问号收尾。`
+	default:
+		return base + fmt.Sprintf(`上一次不合格：%s。请重写完整一集：场次齐全、台词完整、最后一行是 END OF EPISODE %d、人物名严格使用锁定列表、从上一集结尾自然接续。`, msg, n)
+	}
 }
 
 func (g *Generator) chatJSON(messages []Message, label string, maxTokens int) (map[string]any, error) {
@@ -718,4 +795,176 @@ func asInt(v any) int {
 		n, _ := strconv.Atoi(fmt.Sprint(v))
 		return n
 	}
+}
+
+// trimTranscriptForPlanning 把全剧字幕裁剪成策划阶段可喂的长度。
+// 关键原则：**每集都要至少出现一次**，而不是简单按字数硬切前 N 字。
+// 否则 80 集会只剩前 15 集，LLM 根本不知道后面的存在。
+func trimTranscriptForPlanning(transcript string, perEpisodeHeadChars, maxChars int) string {
+	if len(transcript) <= maxChars {
+		return transcript
+	}
+	// 按 "Episode N" 切开
+	epMarkerRE := regexp.MustCompile(`(?im)^Episode\s+(\d+)\s*$`)
+	type piece struct {
+		num   int
+		start int
+		end   int
+		body  string
+	}
+	var pieces []piece
+	loc := epMarkerRE.FindAllStringSubmatchIndex(transcript, -1)
+	if len(loc) == 0 {
+		// 没有 Episode 标记就退回硬切，但加警告
+		return transcript[:maxChars] + "\n…(transcript truncated for planning)"
+	}
+	for i, m := range loc {
+		num, _ := strconv.Atoi(transcript[m[2]:m[3]])
+		start := m[1]
+		end := len(transcript)
+		if i+1 < len(loc) {
+			end = loc[i+1][0]
+		}
+		body := strings.TrimSpace(transcript[start:end])
+		pieces = append(pieces, piece{num: num, start: start, end: end, body: body})
+	}
+	// 每集取前 perEpisodeHeadChars 字
+	var out strings.Builder
+	written := 0
+	for _, p := range pieces {
+		chunk := p.body
+		if len(chunk) > perEpisodeHeadChars {
+			chunk = chunk[:perEpisodeHeadChars]
+		}
+		if out.Len()+len(chunk) > maxChars && written > 0 {
+			out.WriteString(fmt.Sprintf("\n…(后续剧集略，共 %d 集)\n", len(pieces)-written))
+			break
+		}
+		out.WriteString(chunk)
+		out.WriteString("\n\n")
+		written++
+	}
+	return strings.TrimSpace(out.String())
+}
+
+// countTranscriptEpisodes 数一下截断后的字幕里有多少集出现。
+func countTranscriptEpisodes(transcript string) int {
+	re := regexp.MustCompile(`(?im)^Episode\s+(\d+)\s*$`)
+	return len(re.FindAllStringIndex(transcript, -1))
+}
+
+// fillMissingEpisodeOutlines 把 LLM 策划时偷懒漏写的集号补齐。
+// 缺失集用前一集的钩子 + "剧情推进" 作为占位 event，scenes 留空让写剧本阶段自己生成。
+func fillMissingEpisodeOutlines(existing []map[string]any, hint int, emit EmitFn) []map[string]any {
+	if hint <= len(existing) {
+		return existing
+	}
+	has := map[int]map[string]any{}
+	for _, ep := range existing {
+		has[asInt(ep["number"])] = ep
+	}
+	var out []map[string]any
+	var gaps int
+	for n := 1; n <= hint; n++ {
+		if ep, ok := has[n]; ok {
+			out = append(out, ep)
+		} else {
+			gaps++
+			prevHook := ""
+			if len(out) > 0 {
+				prevHook = fmt.Sprint(out[len(out)-1]["hook"])
+			}
+			out = append(out, map[string]any{
+				"number":  n,
+				"event":   fmt.Sprintf("第 %d 集剧情推进（策划阶段该集字幕被截断）", n),
+				"emotion": "承上启下",
+				"scenes":  []string{},
+				"hook":    prevHook,
+				"_filled": true,
+			})
+		}
+	}
+	if gaps > 0 && emit != nil {
+		emit("log", fmt.Sprintf("策划补齐 %d 集占位大纲（LLM 漏写，将在逐集写作阶段自动生成完整大纲）。", gaps), nil)
+	}
+	return out
+}
+
+// rewriteFailedEpisode 补救轮重写失败集：比第一轮更激进的 prompt，
+// 给模型看完整前集尾部 + 前后集大纲 + 明确"这是最后机会必须成功"。
+func (g *Generator) rewriteFailedEpisode(plan map[string]any, ep map[string]any, ctx EpisodePromptContext, n int, allScripts []string, currentIdx int) (string, error) {
+	const salvageAttempts = 3
+	var lastErr error
+
+	// 补救轮给模型看更多上下文：前一集完整正文尾部 800 字（如果相邻有成功集的话）
+	richContext := ctx
+	for prev := currentIdx - 1; prev >= 0 && prev >= currentIdx-2; prev-- {
+		if allScripts[prev] != "" {
+			rs := []rune(allScripts[prev])
+			tail := allScripts[prev]
+			if len(rs) > 800 {
+				tail = string(rs[len(rs)-800:])
+			}
+			richContext.Continuity += "\n- prev_episode_tail:\n" + tail
+			break
+		}
+	}
+	// 后面一集如果也已经成功，也告诉模型
+	for next := currentIdx + 1; next < len(allScripts) && next <= currentIdx+2; next++ {
+		if allScripts[next] != "" {
+			richContext.NextOutline = nextEpisodeOutline([]map[string]any{ep}, 0) + "（注意：你正写的这一集前面可能失败，先写好这一集再说）"
+			break
+		}
+	}
+
+	for attempt := 1; attempt <= salvageAttempts; attempt++ {
+		g.Wait()
+		msgs := BuildEpisodeMessages(g.Skill, plan, []map[string]any{ep}, richContext)
+		msgs = append(msgs, Message{
+			Role: "user",
+			Content: fmt.Sprintf(
+				"【补救重写】Episode %d 前几轮都失败了。这是最后机会，你必须写对。\n"+
+					"硬性要求：\n"+
+					"1) 第一行必须是 Episode %d\n"+
+					"2) 写 6–10 场，每场完整（场次头+动作+对话）\n"+
+					"3) 最后一行独立写 END OF EPISODE %d，写完立即停笔\n"+
+					"4) 不许写任何思考、说明、下一集预告、总结\n"+
+					"5) 严格使用【人物名锁定】里的名字\n"+
+					"现在，从头写完整的 Episode %d。",
+				n, n, n, n,
+			),
+		})
+		temp := 0.6
+		if attempt >= 2 {
+			temp = 0.45 // 更保守
+		}
+		maxToks := 16384
+		if attempt >= 2 {
+			maxToks = 20480
+		}
+		text, err := g.Client.ChatOpt(msgs, ChatOptions{
+			JSONMode:    false,
+			MaxTokens:   maxToks,
+			Temperature: temp,
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		cleaned := CleanScriptText(text)
+		if truncatedMarkerRE.MatchString(cleaned) {
+			lastErr = episodeQualityError{"输出被 max_tokens 截断"}
+			continue
+		}
+		part := isolateEpisode(cleaned, n)
+		if err := validateEpisodeText(part, n); err != nil {
+			lastErr = err
+			continue
+		}
+		return part, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("未知错误")
+	}
+	return "", LLMError{fmt.Sprintf("补救轮 Episode %d 仍失败：%v", n, lastErr)}
 }
