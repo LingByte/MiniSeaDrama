@@ -39,7 +39,7 @@ const jsonHardRule = `硬性规则：
 2. 禁止 Markdown 代码围栏（禁止 ` + "```" + `）。
 3. 禁止在 JSON 前后写任何说明、标题、注释。
 4. 字符串内换行必须写成 \n，不要直接换行。
-5. 字段必须齐全；episodes 必须覆盖用户给出的每一集 number，不得省略。
+5. episodes 数组必须覆盖字幕稿中出现的每一集 Episode N（1,2,3,…）。严禁只给前几集写大纲，严禁跳号、严禁重复 number。
 6. 每个 episode 的 event/emotion/hook 尽量短（各 ≤40 字），scenes 最多 2 条短句。
 7. 必须依据字幕里的实际台词/情节提炼，禁止输出占位或拒答文案（如「待定剧名」「Untitled Series」「原稿缺失」「无法生成」「无内容」「空白」「Content Missing」）。
 8. characters.name 必须是稳定英文全名（名+姓），全剧唯一，禁止同一人多个姓氏。`
@@ -57,7 +57,7 @@ func skillSnippet(skill string) string {
 	return "【写作规范摘要】\n" + s
 }
 
-func BuildPlanMessages(skill, transcript string) []Message {
+func BuildPlanMessages(skill, transcript string, totalEpisodesHint int) []Message {
 	system := strings.TrimSpace(strings.Join([]string{
 		"你是海漫短剧策划助手。",
 		jsonHardRule,
@@ -65,7 +65,15 @@ func BuildPlanMessages(skill, transcript string) []Message {
 		planSchema,
 		skillSnippet(skill),
 	}, "\n\n"))
-	user := "根据下列字幕稿生成策划 JSON。务必覆盖字幕中出现的每一集。\n\n【原作字幕稿】\n" + transcript
+	user := "根据下列字幕稿生成策划 JSON。务必覆盖字幕中出现的每一集。\n\n" + transcript
+	if totalEpisodesHint > 1 {
+		user = fmt.Sprintf(
+			"【硬性要求】字幕稿中检测到约 %d 集的剧集标记，episodes 数组必须覆盖 Episode 1 到 Episode %d 的全部编号。\n"+
+				"严禁跳过集号，严禁只给前几集写大纲。如果后面集的字幕被截断，请依据前序剧情和该集编号自行补充大纲一句话。\n\n"+
+				"根据下列字幕稿生成策划 JSON。\n\n%s",
+			totalEpisodesHint, totalEpisodesHint, transcript,
+		)
+	}
 	return []Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
@@ -122,6 +130,19 @@ func BuildEpisodeMessages(skill string, plan map[string]any, episodes []map[stri
 		"4) 场次头用 集号-场号 LOCATION [INT.|EXT.] [DAY|NIGHT]；" +
 		"5) 【下一集大纲】只用于本集结尾留钩，禁止提前写出下一集正文情节。"
 	stage += "严禁输出：思考过程、<thinking>、交付说明、文件夹/Word 文件名、写作计划、自检清单、中文说明、Status/Writing Episodes 等元信息。"
+	// 占位大纲（策划阶段被截断导致 LLM 漏写的集）：明确告诉 LLM 自由发挥
+	isPlaceholder := false
+	for _, ep := range episodes {
+		if v, _ := ep["_filled"].(bool); v {
+			isPlaceholder = true
+			break
+		}
+	}
+	if isPlaceholder {
+		stage += "\n\n【重要】本集的策划大纲是占位（因字幕被截断未覆盖到本集）。" +
+			"请你根据【衔接卡】里的上一集结尾信息 + 同剧类型与人物性格，自由设计本集剧情走向。" +
+			"大纲里的 event/hook 只是占位文字，忽略它，凭你对前序剧情的理解来推进故事。"
+	}
 	system := strings.TrimSpace(skillSnippet(skill) + "\n\n" + stage)
 
 	nameLock := ctx.NameLock
