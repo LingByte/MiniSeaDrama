@@ -291,9 +291,10 @@ export function metaToScriptFields(meta: GenMeta): Partial<Script> {
   const plot = DEFAULT_GROUPS.find((g) => g.id === 'plot')
   const quality = DEFAULT_GROUPS.find((g) => g.id === 'quality')
   let tags = (plot?.tags ?? []).filter((tag) => joined.includes(tag))
-  if (!tags.length) tags = ['豪门', '反转']
+  // 禁止回落成统一的「豪门+反转」；没匹配时用更中性的默认，便于后台二审改
+  if (!tags.length) tags = ['爽文', '逆袭']
   const grade = (meta.quality || '').trim().charAt(0).toUpperCase()
-  const qualityTag = quality?.tags.find((tag) => tag.startsWith(grade)) || 'B 良好'
+  const qualityTag = quality?.tags.find((tag) => tag.startsWith(grade)) || 'C 基础'
   const episodes = meta.episodes ?? []
   const price = suggestPrice(qualityTag)
   return {

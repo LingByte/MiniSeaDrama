@@ -245,14 +245,30 @@ func (g *Generator) Generate(workdir, transcript string) (map[string]any, error)
 	scriptMD := filepath.Join(outputDir, "剧本.md")
 	_ = os.WriteFile(scriptMD, []byte(fullScript), 0o644)
 
-	rating := map[string]any{"grade": "B", "score": 80, "items": []any{}, "caps": "未触发", "gap": []any{}}
-	g.Emit("log", "已跳过模型评级，直接使用默认等级 B。", nil)
-	_ = writeJSON(filepath.Join(outputDir, "rating.json"), rating)
-
+	titleCN := strings.TrimSpace(fmt.Sprint(plan["title_cn"]))
 	titleEN := strings.TrimSpace(fmt.Sprint(plan["title_en"]))
 	if titleEN == "" {
 		titleEN = "Untitled"
 	}
+	g.Emit("log", "正在用模型做货架评级与情节标签（偏 D～B，避免全 B / 全豪门反转）。", nil)
+	grade, shelfTags, shelfAud, rateErr := RateSingleShelf(
+		g.Client,
+		titleCN,
+		fmt.Sprint(plan["logline"]),
+		joinAny(plan["plot_summary"]),
+		"",
+	)
+	if rateErr != nil {
+		g.Emit("log", "货架评级失败，回落 C："+rateErr.Error(), nil)
+		grade, shelfTags, shelfAud = "C", []string{"爽文", "逆袭"}, "女频"
+	}
+	rating := map[string]any{
+		"grade": grade, "score": gradeScore(grade), "items": []any{}, "caps": "未触发", "gap": []any{},
+		"tags": shelfTags, "audience": shelfAud,
+	}
+	_ = writeJSON(filepath.Join(outputDir, "rating.json"), rating)
+	g.Emit("log", fmt.Sprintf("货架评级 %s，标签 %s。", grade, strings.Join(shelfTags, "/")), nil)
+
 	meta := buildMeta(plan, rating, episodeList)
 	metaPath := filepath.Join(outputDir, "设定要点.json")
 	if err := writeJSON(metaPath, meta); err != nil {
@@ -557,8 +573,7 @@ func qualityFullLabel(grade string) string {
 	if g == "" {
 		return "B 良好"
 	}
-	g = string([]rune(g)[0])
-	switch g {
+	switch string([]rune(g)[0]) {
 	case "S":
 		return "S 顶级精品"
 	case "A":
@@ -571,6 +586,23 @@ func qualityFullLabel(grade string) string {
 		return "D 特价"
 	default:
 		return "B 良好"
+	}
+}
+
+func gradeScore(grade string) int {
+	switch strings.ToUpper(strings.TrimSpace(grade)) {
+	case "S":
+		return 95
+	case "A":
+		return 88
+	case "B":
+		return 78
+	case "C":
+		return 65
+	case "D":
+		return 55
+	default:
+		return 70
 	}
 }
 
@@ -587,6 +619,10 @@ func buildMeta(plan, rating map[string]any, episodeList []map[string]any) map[st
 		}
 	case []string:
 		subs = t
+	}
+	// 货架评级返回的情节标签优先写入 categories.subs，避免前端回落成「豪门/反转」
+	if rawTags, ok := rating["tags"].([]string); ok && len(rawTags) > 0 {
+		subs = append([]string{}, rawTags...)
 	}
 	main := fmt.Sprint(categories["main"])
 	cover, _ := plan["cover"].(map[string]any)
@@ -608,6 +644,9 @@ func buildMeta(plan, rating map[string]any, episodeList []map[string]any) map[st
 	audience := "女频"
 	if strings.Contains(audienceText, "男频") {
 		audience = "男频"
+	}
+	if a := strings.TrimSpace(fmt.Sprint(rating["audience"])); a == "男频" || a == "女频" {
+		audience = a
 	}
 	synopsis := strings.Join(strings.Split(joinAny(plan["plot_summary"]), "\n"), "")
 	if len([]rune(synopsis)) > 300 {
